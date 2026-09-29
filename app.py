@@ -10,7 +10,7 @@ import streamlit as st
 
 db_filename = "tcm_database.db"
 zip_filename = "tcm_database.zip"  # 请确保这与你上传的 zip 文件名完全一致
-
+DB_FILE = "my_database.db"
 # 在连接数据库前，先检查 db 文件是否存在
 if not os.path.exists(db_filename):
     # 如果 db 不存在，检查 zip 文件是否存在
