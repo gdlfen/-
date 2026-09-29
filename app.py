@@ -12,25 +12,30 @@ EXCEL_FILE = '传世名方.xlsx.xlsx'
 @st.cache_resource
 def init_db():
     """首次运行时，遍历Excel所有Sheet并导入可扩展的SQLite数据库"""
-    if not os.path.exists(DB_FILE):
-        if os.path.exists(EXCEL_FILE):
+    if os.path.exists(EXCEL_FILE):
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        # 检查名为 prescriptions 的数据表是否真正存在
+        cursor.execute("SELECT count(name) FROM sqlite_master WHERE type='table' AND name='prescriptions'")
+        
+        # 如果表不存在（0表示不存在），则开始读取Excel
+        if cursor.fetchone()[0] == 0:
             try:
-                xls = pd.ExcelFile(EXCEL_FILE)
+                # 核心修复：强制手动指定 engine='openpyxl'
+                xls = pd.ExcelFile(EXCEL_FILE, engine='openpyxl')
                 df_list = [pd.read_excel(xls, sheet_name=sheet) for sheet in xls.sheet_names]
                 all_data = pd.concat(df_list, ignore_index=True)
-
-                # 建立SQLite连接并存入数据
-                conn = sqlite3.connect(DB_FILE)
+                
+                # 存入数据
                 all_data.to_sql("prescriptions", conn, if_exists="replace", index=True, index_label="id")
-                conn.close()
-                return True
             except Exception as e:
                 st.error(f"数据库初始化失败: {e}")
                 return False
-        else:
-            st.error(f"未找到文件 {EXCEL_FILE}，请将其上传至代码同级目录。")
-            return False
-    return True
+        conn.close()
+        return True
+    else:
+        st.error(f"未找到文件 {EXCEL_FILE}，请将其上传至代码同级目录。")
+        return False
 
 
 def get_connection():
