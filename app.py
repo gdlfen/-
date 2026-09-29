@@ -5,7 +5,7 @@ import os
 
 # --- 全局配置 ---
 DB_FILE = 'tcm_database.db'
-EXCEL_FILE = '传世名方.xlsx'
+EXCEL_FILE = '传世名方.xlsx.xlsx'
 
 
 # --- 1. 数据库后端逻辑（Excel自动转换为SQLite数据库） ---
