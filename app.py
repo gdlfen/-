@@ -4,24 +4,36 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 
-# 【修改点】统一使用一个数据库文件名
+# 统一使用同一个数据库文件名
 DB_FILE = "tcm_database.db"
-zip_filename = "tcm_database.zip"  # 请确保这与你上传的 zip 文件名完全一致
+zip_filename = "tcm_database.zip" 
 
-# 在连接数据库前，先检查 db 文件是否存在
+# 检查 db 文件是否存在，不存在则尝试解压
 if not os.path.exists(DB_FILE):
-    # 如果 db 不存在，检查 zip 文件是否存在
     if os.path.exists(zip_filename):
         try:
             with zipfile.ZipFile(zip_filename, 'r') as zip_ref:
                 zip_ref.extractall(".")  # 解压到当前根目录
         except Exception as e:
             st.error(f"解压失败: {e}")
+            st.stop()
     else:
         st.error("⚠️ 未找到数据库压缩包，请确保已将 zip 文件上传至 GitHub 仓库根目录。")
+        st.stop()
 
 def get_connection():
+    # 此时连接的就是解压出来的真实数据库，而不是自动创建的空数据库
     return sqlite3.connect(DB_FILE, check_same_thread=False)
+
+# --- 以下为您原来的前端界面与路由代码 ---
+st.set_page_config(page_title="名方检索系统", page_icon="🌿", layout="centered")
+
+# 再次确认文件确实存在（防止解压失败依然往下运行）
+if not os.path.exists(DB_FILE):
+    st.error("⚠️ 未找到数据库文件 tcm_database.db，请确保解压成功。")
+    st.stop()
+
+# ... 后续侧边栏及功能代码保持不变 ...
 
 # --- 以下为您原来的前端界面与路由代码 ---
 st.set_page_config(page_title="名方检索系统", page_icon="🌿", layout="centered")
