@@ -1,25 +1,20 @@
-import streamlit as st
-import pandas as pd
-import sqlite3
-import os
-import zipfile  # 引入解压模块
-
 import os
 import zipfile
 import streamlit as st
+import pandas as pd
+import sqlite3
 
-db_filename = "tcm_database.db"
+# 【修改点】统一使用一个数据库文件名
+DB_FILE = "tcm_database.db"
 zip_filename = "tcm_database.zip"  # 请确保这与你上传的 zip 文件名完全一致
-DB_FILE = "my_database.db"
+
 # 在连接数据库前，先检查 db 文件是否存在
-if not os.path.exists(db_filename):
+if not os.path.exists(DB_FILE):
     # 如果 db 不存在，检查 zip 文件是否存在
     if os.path.exists(zip_filename):
         try:
             with zipfile.ZipFile(zip_filename, 'r') as zip_ref:
                 zip_ref.extractall(".")  # 解压到当前根目录
-            # 解压完成后可选择隐藏这条提示，或保留用于调试
-            # st.success("数据库文件已成功解压！") 
         except Exception as e:
             st.error(f"解压失败: {e}")
     else:
@@ -27,6 +22,16 @@ if not os.path.exists(db_filename):
 
 def get_connection():
     return sqlite3.connect(DB_FILE, check_same_thread=False)
+
+# --- 以下为您原来的前端界面与路由代码 ---
+st.set_page_config(page_title="名方检索系统", page_icon="🌿", layout="centered")
+
+# 检查数据库文件是否存在
+if not os.path.exists(DB_FILE):
+    st.error(f"⚠️ 未找到数据库文件 {DB_FILE}，请确保解压成功或已上传。")
+    st.stop()
+
+# ... (保留您后续所有的 UI 和功能代码不变)
 
 # --- 以下为您原来的前端界面与路由代码 ---
 st.set_page_config(page_title="名方检索系统", page_icon="🌿", layout="centered")
