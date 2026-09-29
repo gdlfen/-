@@ -2,14 +2,26 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
+import zipfile  # 引入解压模块
 
 # --- 全局配置 ---
 DB_FILE = 'tcm_database.db'
+ZIP_FILE = 'tcm_database.zip'
+
+# --- 自动解压逻辑 ---
+if not os.path.exists(DB_FILE):
+    if os.path.exists(ZIP_FILE):
+        # 如果发现有 zip 包但没有 db 文件，就自动解压
+        with zipfile.ZipFile(ZIP_FILE, 'r') as zip_ref:
+            zip_ref.extractall('.') # 解压到当前目录
+    else:
+        st.error("⚠️ 未找到数据库文件或压缩包，请检查 GitHub 仓库。")
+        st.stop()
 
 def get_connection():
     return sqlite3.connect(DB_FILE, check_same_thread=False)
 
-# --- 前端界面与路由 ---
+# --- 以下为您原来的前端界面与路由代码 ---
 st.set_page_config(page_title="名方检索系统", page_icon="🌿", layout="centered")
 
 # 检查数据库文件是否存在
