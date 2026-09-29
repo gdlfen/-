@@ -4,19 +4,26 @@ import sqlite3
 import os
 import zipfile  # 引入解压模块
 
-# --- 全局配置 ---
-DB_FILE = 'tcm_database.db'
-ZIP_FILE = 'tcm_database.zip'
+import os
+import zipfile
+import streamlit as st
 
-# --- 自动解压逻辑 ---
-if not os.path.exists(DB_FILE):
-    if os.path.exists(ZIP_FILE):
-        # 如果发现有 zip 包但没有 db 文件，就自动解压
-        with zipfile.ZipFile(ZIP_FILE, 'r') as zip_ref:
-            zip_ref.extractall('.') # 解压到当前目录
+db_filename = "tcm_database.db"
+zip_filename = "tcm_database.zip"  # 请确保这与你上传的 zip 文件名完全一致
+
+# 在连接数据库前，先检查 db 文件是否存在
+if not os.path.exists(db_filename):
+    # 如果 db 不存在，检查 zip 文件是否存在
+    if os.path.exists(zip_filename):
+        try:
+            with zipfile.ZipFile(zip_filename, 'r') as zip_ref:
+                zip_ref.extractall(".")  # 解压到当前根目录
+            # 解压完成后可选择隐藏这条提示，或保留用于调试
+            # st.success("数据库文件已成功解压！") 
+        except Exception as e:
+            st.error(f"解压失败: {e}")
     else:
-        st.error("⚠️ 未找到数据库文件或压缩包，请检查 GitHub 仓库。")
-        st.stop()
+        st.error("⚠️ 未找到数据库压缩包，请确保已将 zip 文件上传至 GitHub 仓库根目录。")
 
 def get_connection():
     return sqlite3.connect(DB_FILE, check_same_thread=False)
