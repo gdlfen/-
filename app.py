@@ -5,48 +5,17 @@ import os
 
 # --- 全局配置 ---
 DB_FILE = 'tcm_database.db'
-EXCEL_FILE = '传世名方.xlsx'
-
-
-# --- 1. 数据库后端逻辑（Excel自动转换为SQLite数据库） ---
-@st.cache_resource
-def init_db():
-    """首次运行时，遍历Excel所有Sheet并导入可扩展的SQLite数据库"""
-    if os.path.exists(EXCEL_FILE):
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        # 检查名为 prescriptions 的数据表是否真正存在
-        cursor.execute("SELECT count(name) FROM sqlite_master WHERE type='table' AND name='prescriptions'")
-        
-        # 如果表不存在（0表示不存在），则开始读取Excel
-        if cursor.fetchone()[0] == 0:
-            try:
-                # 核心修复：强制手动指定 engine='openpyxl'
-                xls = pd.ExcelFile(EXCEL_FILE, engine='openpyxl')
-                df_list = [pd.read_excel(xls, sheet_name=sheet) for sheet in xls.sheet_names]
-                all_data = pd.concat(df_list, ignore_index=True)
-                
-                # 存入数据
-                all_data.to_sql("prescriptions", conn, if_exists="replace", index=True, index_label="id")
-            except Exception as e:
-                st.error(f"数据库初始化失败: {e}")
-                return False
-        conn.close()
-        return True
-    else:
-        st.error(f"未找到文件 {EXCEL_FILE}，请将其上传至代码同级目录。")
-        return False
-
 
 def get_connection():
     return sqlite3.connect(DB_FILE, check_same_thread=False)
 
-
-# 执行初始化
-init_db()
-
-# --- 2. 前端界面与路由 ---
+# --- 前端界面与路由 ---
 st.set_page_config(page_title="名方检索系统", page_icon="🌿", layout="centered")
+
+# 检查数据库文件是否存在
+if not os.path.exists(DB_FILE):
+    st.error("⚠️ 未找到数据库文件 tcm_database.db，请确保已将其上传至 GitHub 仓库根目录。")
+    st.stop()
 
 # 侧边栏导航
 st.sidebar.title("🌿 系统菜单")
@@ -55,38 +24,35 @@ page = st.sidebar.radio("请选择功能模块", ["🔍 临床病名检索", "�
 # ----------------- 用户搜索端 -----------------
 if page == "🔍 临床病名检索":
     st.title("🔍 传世名方检索系统")
-    st.markdown("通过输入**临床病名**搜索相关的名方及详细病例（手机端自动适配）。")
-
+    st.markdown("通过输入**临床病名**搜索相关的名方及详细病例。")
+    
     search_term = st.text_input("💡 临床病名 (例如：胃及十二指肠溃疡、感冒)", "")
-
+    
     if st.button("开始搜索", type="primary"):
         if search_term.strip() == "":
             st.warning("⚠️ 请先输入您要查询的临床病名！")
         else:
             conn = get_connection()
-            # SQL模糊查询，匹配所有符合条件的行
             query = "SELECT * FROM prescriptions WHERE 临床病名 LIKE ?"
             df_result = pd.read_sql(query, conn, params=(f'%{search_term}%',))
             conn.close()
-
+            
             if df_result.empty:
                 st.info("📉 未找到匹配结果，请尝试缩短或更换关键词。")
             else:
                 st.success(f"✅ 检索成功！共找到 {len(df_result)} 条相关记录：")
-
-                # 采用 Expander 折叠卡片，优化手机端上下滑动阅读体验
+                
                 for index, row in df_result.iterrows():
                     fangji = row.get('方剂名', '未知')
                     bingming = row.get('临床病名', '未知')
-
+                    
                     with st.expander(f"📌 【{fangji}】 匹配病名: {bingming}"):
                         st.markdown(f"**👨‍⚕️ 大医名:** {row.get('大医名', '无')}")
                         st.markdown(f"**🏷️ 方别:** {row.get('方别', '无')}")
                         st.markdown(f"**📜 方剂详情:**\n\n {row.get('方剂详情', '无')}")
                         st.markdown(f"**🩺 病例详情:**\n\n {row.get('病例详情', '无')}")
                         st.markdown(f"**📝 临证提要:**\n\n {row.get('临证提要', '无')}")
-
-                        # 按语及研究（若非空则显示）
+                        
                         if pd.notna(row.get('按语')):
                             st.markdown(f"**💡 按语:**\n\n {row.get('按语')}")
                         if pd.notna(row.get('现代研究')):
@@ -95,18 +61,18 @@ if page == "🔍 临床病名检索":
 # ----------------- 后台管理端 -----------------
 elif page == "⚙️ 后台管理系统":
     st.title("⚙️ 数据库后台管理")
-
+    
     password = st.text_input("🔑 请输入管理员密码", type="password")
-
-    if password == "admin123":  # 默认密码
+    
+    if password == "admin123":
         st.success("✅ 登录成功！")
         conn = get_connection()
-
+        
         # 1. 查看数据
         st.subheader("📊 现有记录总览")
         df_all = pd.read_sql("SELECT id, 大医名, 方剂名, 临床病名 FROM prescriptions", conn)
         st.dataframe(df_all, use_container_width=True)
-
+        
         # 2. 增加数据
         st.subheader("➕ 添加新名方")
         with st.form("add_form"):
@@ -116,7 +82,7 @@ elif page == "⚙️ 后台管理系统":
             new_xq = st.text_area("方剂详情")
             new_bl = st.text_area("病例详情")
             submitted = st.form_submit_button("保存至数据库")
-
+            
             if submitted:
                 if new_fj and new_bm:
                     cursor = conn.cursor()
@@ -129,7 +95,7 @@ elif page == "⚙️ 后台管理系统":
                     st.rerun()
                 else:
                     st.error("方剂名和临床病名为必填项！")
-
+                    
         # 3. 删除数据
         st.subheader("🗑️ 移除记录")
         delete_id = st.number_input("输入要删除的记录ID", min_value=0, step=1)
@@ -139,7 +105,7 @@ elif page == "⚙️ 后台管理系统":
             conn.commit()
             st.success(f"已删除ID为 {delete_id} 的记录。")
             st.rerun()
-
+            
         conn.close()
     elif password != "":
         st.error("❌ 密码错误！")
