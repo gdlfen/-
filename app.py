@@ -106,7 +106,7 @@ def log_query(search_type, keyword):
         pass
 
 # --- 2. 侧边栏与路由 ---
-st.sidebar.image("https://api.iconify.design/game-icons:yin-yang.svg?color=%238a360f&width=80", use_column_width=False)
+st.sidebar.markdown("<h1 style='text-align: center; font-size: 60px;'>☯️</h1>", unsafe_allow_html=True)
 st.sidebar.title("📜 中医典藏系统")
 page = st.sidebar.radio("模块导航", [
     "🔍 传世名方基础检索", 
