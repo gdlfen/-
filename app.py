@@ -355,9 +355,9 @@ elif page == "⚙️ 典藏后台管理系统":
 
         with tab_edit:
             st.subheader("✏️ 数据精确定向维护")
-            st.warning("⚠️ 数据库体积庞大，全量铺开会导致浏览器崩溃卡死。请通过下方表单精确完成录入与删除。")
+            st.warning("⚠️ 数据库体积庞大，全量铺开会导致浏览器崩溃卡死。请通过下方表单精确完成录入、修改与删除。")
 
-            action_type = st.radio("请选择执行的操作", ["➕ 新增记录", "🗑️ 定向删除"], horizontal=True)
+            action_type = st.radio("请选择执行的操作", ["➕ 新增记录", "🔍 搜索与修改", "🗑️ 定向删除"], horizontal=True)
 
             if action_type == "➕ 新增记录":
                 tbl = st.selectbox("目标表", ["formulas (名方)", "recipes (食谱)"])
@@ -399,7 +399,92 @@ elif page == "⚙️ 典藏后台管理系统":
                             else:
                                 st.error("菜名为必填项！")
 
-            elif action_type == "🗑️ 定向删除":
+            elif action_type == "🔍 搜索与修改":
+                st.markdown("通过关键字定位数据并进行编辑更新。")
+                edit_tbl = st.selectbox("修改目标表", ["formulas (名方)", "recipes (食谱)"])
+                real_tbl = "formulas" if "formulas" in edit_tbl else "recipes"
+
+                search_kw = st.text_input("🔍 输入检索词 (如方名、菜名、病名等以查找)")
+
+                if search_kw.strip():
+                    conn = get_connection()
+                    if real_tbl == "formulas":
+                        query = "SELECT id, 方剂名, 临床病名, 大医名 FROM formulas WHERE 方剂名 LIKE ? OR 临床病名 LIKE ? LIMIT 20"
+                    else:
+                        query = "SELECT id, 菜名, 品类 FROM recipes WHERE 菜名 LIKE ? OR 功效和注意事项 LIKE ? LIMIT 20"
+
+                    search_res = pd.read_sql(query, conn, params=(f'%{search_kw}%', f'%{search_kw}%'))
+                    conn.close()
+
+                    if search_res.empty:
+                        st.info("未找到匹配的记录。")
+                    else:
+                        st.write(f"找到 {len(search_res)} 条关联记录 (最多显示前20条)：")
+                        st.dataframe(search_res, hide_index=True)
+
+                        edit_id = st.number_input("请输入您要修改的记录 ID", min_value=0, step=1, value=0)
+
+                        if edit_id > 0:
+                            conn = get_connection()
+                            record = pd.read_sql(f"SELECT * FROM {real_tbl} WHERE id=?", conn, params=(edit_id,))
+                            conn.close()
+
+                            if not record.empty:
+                                row = record.iloc[0]
+                                with st.form("update_form"):
+                                    if real_tbl == "formulas":
+                                        st.info(f"正在修改 ID: {edit_id} 的名方")
+                                        u_f_name = st.text_input("方剂名*", value=row.get('方剂名') if pd.notna(
+                                            row.get('方剂名')) else "")
+                                        u_b_name = st.text_input("临床病名*", value=row.get('临床病名') if pd.notna(
+                                            row.get('临床病名')) else "")
+                                        u_d_name = st.text_input("大医名", value=row.get('大医名') if pd.notna(
+                                            row.get('大医名')) else "")
+                                        u_det = st.text_area("方剂详情", value=row.get('方剂详情') if pd.notna(
+                                            row.get('方剂详情')) else "")
+                                        u_cas = st.text_area("病例详情", value=row.get('病例详情') if pd.notna(
+                                            row.get('病例详情')) else "")
+                                        u_sumry = st.text_area("临证提要", value=row.get('临证提要') if pd.notna(
+                                            row.get('临证提要')) else "")
+
+                                        if st.form_submit_button("💾 保存名方修改", type="primary"):
+                                            if u_f_name and u_b_name:
+                                                conn = get_connection()
+                                                conn.execute(
+                                                    "UPDATE formulas SET 方剂名=?, 临床病名=?, 大医名=?, 方剂详情=?, 病例详情=?, 临证提要=? WHERE id=?",
+                                                    (u_f_name, u_b_name, u_d_name, u_det, u_cas, u_sumry, edit_id))
+                                                conn.commit()
+                                                conn.close()
+                                                st.success("名方记录修改成功！")
+                                            else:
+                                                st.error("必填项不可为空！")
+                                    else:
+                                        st.info(f"正在修改 ID: {edit_id} 的食谱")
+                                        u_r_name = st.text_input("菜名*", value=row.get('菜名') if pd.notna(
+                                            row.get('菜名')) else "")
+                                        u_r_type = st.text_input("品类", value=row.get('品类') if pd.notna(
+                                            row.get('品类')) else "")
+                                        u_r_mat = st.text_area("材料和制作", value=row.get('材料和制作') if pd.notna(
+                                            row.get('材料和制作')) else "")
+                                        u_r_eff = st.text_area("功效和注意事项",
+                                                               value=row.get('功效和注意事项') if pd.notna(
+                                                                   row.get('功效和注意事项')) else "")
+
+                                        if st.form_submit_button("💾 保存食谱修改", type="primary"):
+                                            if u_r_name:
+                                                conn = get_connection()
+                                                conn.execute(
+                                                    "UPDATE recipes SET 菜名=?, 品类=?, 材料和制作=?, 功效和注意事项=? WHERE id=?",
+                                                    (u_r_name, u_r_type, u_r_mat, u_r_eff, edit_id))
+                                                conn.commit()
+                                                conn.close()
+                                                st.success("食谱记录修改成功！")
+                                            else:
+                                                st.error("菜名为必填项！")
+                            else:
+                                st.warning("未找到该 ID 对应的记录，请核对后输入。")
+
+            elif action_type == "🗑️️ 定向删除":
                 st.markdown("通过 ID 精确定位数据并删除，确保系统响应极速不卡顿。")
                 del_tbl = st.selectbox("目标表", ["formulas", "recipes"])
                 del_id = st.number_input(f"请输入要删除的 {del_tbl} 记录的 ID", min_value=1, step=1)
@@ -419,7 +504,6 @@ elif page == "⚙️ 典藏后台管理系统":
                         st.rerun()
                 else:
                     st.info("未找到此 ID 对应的数据。")
-
         with tab_import:
             st.subheader("📥 Excel 批量智能导入")
             uploaded_file = st.file_uploader("请上传待导入的 Excel 文件 (.xlsx)", type=["xlsx", "xls"])
