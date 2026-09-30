@@ -157,7 +157,7 @@ elif page == "🤖 传世名方 AI 智能检索":
     if not st.session_state.ai_auth:
         ai_pwd = st.text_input("🔑 请输入医师/高级访问密码以启用 AI 引擎", type="password")
         if st.button("解锁 AI 引擎"):
-            if ai_pwd == "doctor888":  # 默认AI密码
+            if ai_pwd == "888":  # 默认AI密码
                 st.session_state.ai_auth = True
                 st.rerun()
             else:
@@ -166,8 +166,8 @@ elif page == "🤖 传世名方 AI 智能检索":
         # AI 引擎配置（支持 OpenAI 兼容格式，如 DeepSeek, Zhipu, Kimi 等）
         with st.expander("⚙️ AI 模型底层配置 (默认配置为通用接口，请根据需要修改)"):
             api_key = st.text_input("API Key", type="password", value="您的API_KEY")
-            base_url = st.text_input("Base URL", value="https://api.openai.com/v1")
-            model_name = st.text_input("模型名称", value="gpt-4o-mini")
+            base_url = st.text_input("Base URL", value="https://api.deepseek.com/v1")
+            model_name = st.text_input("模型名称", value="deepseek-chat")
 
         condition_desc = st.text_area("✍️ 请详细描述疾病情况 (如: 胃痛时而剧烈，隐隐作痛，伴有头晕不眠，舌淡白...)", height=150)
         
