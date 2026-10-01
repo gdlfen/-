@@ -154,7 +154,7 @@ elif page == "🤖 传世名方 AI 检索":
         st.session_state.ai_auth = False
 
     if not st.session_state.ai_auth:
-        ai_pwd = st.text_input("🔑 请输入医师/高级访问密码以启用 AI 引擎", type="password")
+        ai_pwd = st.text_input("🔑 请输入访问密码以启用 AI 引擎", type="password")
         if st.button("解锁 AI 引擎"):
             if ai_pwd == "888":
                 st.session_state.ai_auth = True
