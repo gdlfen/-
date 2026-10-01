@@ -187,11 +187,10 @@ elif page == "🤖 传世名方 AI 检索":
                     corpus = df_all.to_dict(orient="records")
                     corpus_str = json.dumps(corpus[:100], ensure_ascii=False)
 
-                    system_prompt = """你是一位严谨的中医专家。
+                    system_prompt = """你是一位资深严谨的中医专家。
                     规则1：你只能使用我提供的<数据库语料>来回答，绝对不能编造外部知识！如果不匹配，请返回空列表。
-                    规则2：根据用户的【病情描述】，在语料中全面分析筛查，选择匹配度最高的方剂。
+                    规则2：根据用户的【病情描述】，结合你所掌握的中医知识和经验进行分析，在我提供的<数据库语料>中全面筛查，选择合适度最高的方剂。
                     规则3：输出严格的JSON。格式: {"matched_ids": [1, 5], "highlight_keywords": ["胃痛", "舌淡白"]}"""
-
                     user_prompt = f"<数据库语料>\n{corpus_str}\n</数据库语料>\n\n用户的病情：{condition_desc}"
 
                     try:
