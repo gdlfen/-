@@ -1,546 +1,569 @@
-import streamlit as st
-import pandas as pd
-import sqlite3
-import os
-import zipfile
+# -*- coding: utf-8 -*-
+"""
+Streamlit 前端（手机可直接访问）
+
+两种运行模式（侧边栏可切换）：
+- **内置模式（推荐，Streamlit 云端一键部署）**：直接调用 core 包在同一进程内跑流水线；
+- **API 模式**：填写后端地址（server/main.py 起的 FastAPI），由后端执行、前端只做展示与下载。
+
+启动： streamlit run webapp/app.py
+"""
+from __future__ import annotations
+
+import io
 import json
-from openai import OpenAI
+import os
+import shutil
+import sys
+import tempfile
+import time
+import zipfile
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-# --- 全局与主题配置 (必须放在最顶部) ---
-st.set_page_config(page_title="典藏传世名方系统V2.0", page_icon="📜", layout="wide")
+import pandas as pd
+import streamlit as st
 
-# 注入自定义 CSS：庄重、古朴的中医古籍风格
-st.markdown("""
-    <style>
-    .stApp { background-color: #FDFBF7; font-family: 'Noto Serif SC', 'SimSun', 'Songti SC', serif; color: #2C2825; }
-    h1, h2, h3 { color: #792D11 !important; font-weight: bold; }
-    [data-testid="stSidebar"] { background-color: #F2E8D5; border-right: 2px solid #D9C5A0; }
-    .stButton>button { background-color: #792D11; color: #FFFFFF; border-radius: 4px; border: 1px solid #4A1A08; transition: all 0.3s ease; font-weight: bold; }
-    .stButton>button:hover { background-color: #4A1A08; color: #FDFBF7; border: 1px solid #792D11; }
-    [data-testid="stVerticalBlockBorderWrapper"] { background-color: #FFFFFF; border: 1px solid #E8DCC4 !important; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-radius: 8px; }
-    mark.yellow-highlight { background-color: #FFF2CC; color: #B83B00; font-weight: bold; padding: 0 4px; border-radius: 2px; border-bottom: 2px solid #F0B27A; }
-    .disclaimer { color: #B83B00; font-size: 0.85rem; padding: 10px; border-top: 1px dashed #D9C5A0; margin-top: 30px; }
-    </style>
-""", unsafe_allow_html=True)
+# ---- 允许 `streamlit run webapp/app.py` 时 import core / server ----
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
-DB_FILE = "tcm_database.db"
-ZIP_FILE = "tcm_database.zip"
+from core import config as cfg_mod          # noqa: E402
+from core import contracts as C             # noqa: E402
+from core import pipeline as pipe           # noqa: E402
+from core.common import DiskCache, make_logger  # noqa: E402
 
+st.set_page_config(page_title="价值投资智能分析（云端版）", page_icon="📈",
+                   layout="wide", initial_sidebar_state="collapsed")
 
-# --- 1. 数据库解压与初始化 ---
-@st.cache_resource
-def init_system():
-    if not os.path.exists(DB_FILE):
-        if os.path.exists(ZIP_FILE):
-            try:
-                with zipfile.ZipFile(ZIP_FILE, 'r') as zip_ref:
-                    zip_ref.extractall(".")
-            except Exception as e:
-                return False, f"解压失败: {e}"
-        else:
-            return False, "未找到数据库文件或压缩包。"
-
-    # 确保辅助表存在
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS query_logs
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  ip_address TEXT, search_type TEXT, keyword TEXT, 
-                  query_time DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-
-    c.execute('''CREATE TABLE IF NOT EXISTS ai_config
-                 (id INTEGER PRIMARY KEY CHECK (id = 1), 
-                  api_key TEXT, base_url TEXT, model_name TEXT)''')
-
-    c.execute("SELECT COUNT(*) FROM ai_config")
-    if c.fetchone()[0] == 0:
-        c.execute(
-            "INSERT INTO ai_config (id, api_key, base_url, model_name) VALUES (1, '', 'https://api.deepseek.com/v1', 'deepseek-chat')")
-
-    conn.commit()
-    conn.close()
-    return True, "Success"
+# ======================================================================
+# 会话级数据目录（云端文件系统不保证持久，故每次会话独立，并支持一键打包下载）
+# ======================================================================
+def _session_dir() -> str:
+    if "data_dir" not in st.session_state:
+        base = os.environ.get("VIM_DATA_DIR") or tempfile.mkdtemp(prefix="vim_")
+        st.session_state.data_dir = base
+        os.makedirs(base, exist_ok=True)
+    return st.session_state.data_dir
 
 
-status, msg = init_system()
-if not status:
-    st.error(f"⚠️️ 系统初始化失败: {msg}")
-    st.stop()
+def _cache_dir() -> str:
+    d = os.path.join(_session_dir(), "_cache")
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
-def get_connection():
-    return sqlite3.connect(DB_FILE, check_same_thread=False)
+def _cfg() -> Dict[str, Any]:
+    if "user_config" not in st.session_state:
+        st.session_state.user_config = cfg_mod.load_user_config(_session_dir())
+    return st.session_state.user_config
 
 
-def log_query(search_type, keyword):
+# ======================================================================
+# 侧边栏
+# ======================================================================
+with st.sidebar:
+    st.markdown("## 📈 价值投资分析")
+    st.caption("云端版 · 手机可用")
+    mode = st.radio("运行模式", ["内置引擎（推荐）", "远程 API"], index=0, horizontal=False)
+    api_base = ""
+    if mode == "远程 API":
+        api_base = st.text_input("后端地址", value=st.session_state.get("api_base", "http://127.0.0.1:8000"))
+        st.session_state.api_base = api_base
+        st.caption("后端启动：`uvicorn server.main:app --host 0.0.0.0 --port 8000`")
+
+    st.divider()
+    st.metric("数据目录", os.path.basename(_session_dir()))
+    if st.button("🧹 清空本次会话数据", use_container_width=True):
+        shutil.rmtree(_session_dir(), ignore_errors=True)
+        for k in ("data_dir", "job", "last_result", "user_config"):
+            st.session_state.pop(k, None)
+        st.rerun()
+
+MODE_LOCAL = mode.startswith("内置")
+
+# ======================================================================
+# HTTP 客户端（仅在远程 API 模式下使用）
+# ======================================================================
+import requests  # noqa: E402
+
+
+def api(method: str, path: str, **kw) -> Any:
+    url = st.session_state.get("api_base", api_base).rstrip("/") + path
+    r = requests.request(method, url, timeout=kw.pop("timeout", 60), **kw)
+    r.raise_for_status()
+    return r.json()
+
+
+# ======================================================================
+# 内置引擎：线程安全的"内存 Job"（与 server.jobs 同结构，供前端直接轮询）
+# ======================================================================
+class LocalJob:
+    def __init__(self, stage_keys: List[str], params: Dict[str, Any]):
+        import threading
+        from collections import deque
+        self.id = "local-" + datetime.now().strftime("%H%M%S")
+        self.stage_keys = stage_keys
+        self.params = params
+        self.status = "pending"
+        self.stage_total = len(stage_keys)
+        self.stage_index = 0
+        self.stage_name = ""
+        self.step_done = 0
+        self.step_total = 0
+        self.step_label = ""
+        self.logs = deque(maxlen=3000)
+        self.result: Optional[Dict[str, Any]] = None
+        self.error = ""
+        self.started_at = self.finished_at = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    # ---- 供 pipeline 回调 ----
+    def log(self, msg: str) -> None:
+        self.logs.append(str(msg))
+
+    def progress(self, done: int, total: int, label: str = "") -> None:
+        self.step_done, self.step_total, self.step_label = done, total, label
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "id": self.id, "status": self.status,
+            "stage_index": self.stage_index, "stage_total": self.stage_total,
+            "stage_name": self.stage_name,
+            "step_done": self.step_done, "step_total": self.step_total, "step_label": self.step_label,
+            "logs": list(self.logs), "result": self.result, "error": self.error,
+            "elapsed": (self.finished_at or time.time()) - (self.started_at or time.time()),
+        }
+
+    # ---- 执行 ----
+    def _run(self) -> None:
+        self.status = "running"
+        self.started_at = time.time()
+        try:
+            cfg = _cfg()
+            results: Dict[str, Any] = {}
+            for idx, key in enumerate(self.stage_keys):
+                self.stage_index = idx + 1
+                self.stage_name = next((s["name"] for s in pipe.STAGES if s["key"] == key), key)
+                self.step_done = self.step_total = 0
+                self.log("=" * 60)
+                self.log(f"▶️ {self.stage_name}")
+                ctx = pipe.make_context(_session_dir(), _cache_dir(), user_config=cfg,
+                                        log=make_logger(self.log), progress=self.progress)
+                sp = self.params.get(key)
+                sp = dict(sp) if isinstance(sp, dict) else {}
+                fn = pipe._STAGE_FUNCS.get(key)
+                if fn is None:
+                    continue
+                try:
+                    res = fn(ctx, sp)
+                except Exception as e:  # noqa: BLE001
+                    import traceback
+                    self.log(f"❌ {self.stage_name} 失败：{type(e).__name__}: {e}")
+                    self.log(traceback.format_exc()[:1500])
+                    res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                results[key] = res
+                self.log(f"{'✅' if (res or {}).get('ok') else '⚠️'} {self.stage_name} 结束")
+                if key == "report" and not (res or {}).get("ok"):
+                    self.log("⛔ 年报汇总未成功，中止后续阶段")
+                    break
+            self.result = {"results": pipe._jsonable(results)}
+            self.status = "done"
+        except Exception as e:  # noqa: BLE001
+            self.error = f"{type(e).__name__}: {e}"
+            self.status = "failed"
+        finally:
+            self.finished_at = time.time()
+
+
+# ======================================================================
+# 通用：启动任务 + 进度展示
+# ======================================================================
+def start_job(stage_keys: List[str], params: Dict[str, Any]) -> None:
+    if MODE_LOCAL:
+        st.session_state.job = LocalJob(stage_keys, params)
+    else:
+        payload = {"stages": stage_keys, "params": params, "user_config": _cfg()}
+        try:
+            resp = api("POST", "/api/jobs", json=payload)
+            st.session_state.job_id = resp["job_id"]
+            st.session_state.job = None
+        except Exception as e:  # noqa: BLE001
+            st.error(f"调用后端失败：{e}")
+            st.stop()
+
+
+class RemoteJob:
+    """远程后端任务的轻量代理（每次 snapshot 都去后端拉最新状态）。"""
+
+    def __init__(self, job_id: str, base: str):
+        self.job_id = job_id
+        self.base = base
+
+    def snapshot(self) -> Dict[str, Any]:
+        url = self.base.rstrip("/") + f"/api/jobs/{self.job_id}"
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        return r.json()
+
+
+def _current_job():
+    """取出当前任务对象：内置模式用 LocalJob，远程模式用 RemoteJob。"""
+    if MODE_LOCAL:
+        return st.session_state.get("job")
+    jid = st.session_state.get("job_id")
+    if not jid:
+        return None
+    return RemoteJob(jid, st.session_state.get("api_base", ""))
+
+
+def render_job_progress() -> Optional[Dict[str, Any]]:
+    """展示运行进度；完成时返回结果快照。"""
+    job = _current_job()
+    if job is None:
+        return None
     try:
-        conn = get_connection()
-        c = conn.cursor()
-        c.execute("INSERT INTO query_logs (search_type, keyword) VALUES (?, ?)", (search_type, keyword))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+        snap = job.snapshot()
+    except Exception as e:  # noqa: BLE001
+        st.error(f"读取任务状态失败：{e}")
+        return None
+    status = snap.get("status")
+    label_map = {"pending": "排队中", "running": "运行中", "done": "已完成",
+                 "failed": "失败", "cancelled": "已取消"}
+    st.info(f"任务 {snap.get('id')} · 状态：**{label_map.get(status, status)}** · "
+            f"阶段 {snap.get('stage_index')}/{snap.get('stage_total')} {snap.get('stage_name')} · "
+            f"用时 {snap.get('elapsed', 0):.0f}s")
+    if snap.get("step_total"):
+        st.progress(min(1.0, snap["step_done"] / max(1, snap["step_total"])),
+                    text=f"{snap['step_label']} ({snap['step_done']}/{snap['step_total']})")
+    with st.expander("📜 运行日志", expanded=(status == "running")):
+        st.code("\n".join(snap.get("logs", [])[-400:]) or "（暂无日志）")
+    if status in ("done", "failed", "cancelled"):
+        return snap
+    # 仍在运行：稍等后自动刷新（无需手动点按钮）
+    time.sleep(1.5)
+    st.rerun()
+    return None
 
 
-def highlight_text(text, kw_list):
-    if not isinstance(text, str) or not text: return ""
-    for kw in kw_list:
-        if kw and len(kw) > 1:
-            text = text.replace(kw, f"<mark class='yellow-highlight'>{kw}</mark>")
-    return text
+# ======================================================================
+# 结果与文件
+# ======================================================================
+def list_output_files() -> List[Dict[str, Any]]:
+    root = _session_dir()
+    out: List[Dict[str, Any]] = []
+    for r, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d != "_cache"]
+        for f in files:
+            if f.startswith("~$"):
+                continue
+            p = os.path.join(r, f)
+            out.append({"name": f, "rel": os.path.relpath(p, root), "path": p,
+                        "size": os.path.getsize(p), "mtime": os.path.getmtime(p)})
+    out.sort(key=lambda x: -x["mtime"])
+    return out
 
 
-# --- 2. 侧边栏与路由 ---
-st.sidebar.markdown("<h1 style='text-align: center; font-size: 60px;'>☯️</h1>", unsafe_allow_html=True)
-st.sidebar.title("📜 中医典藏系统V2.0")
-page = st.sidebar.radio("模块导航", [
-    "🔍 传世名方基础检索",
-    "🤖 传世名方 AI 检索",
-    "🍲 四季养生食谱检索",
-    "⚙️ 典藏后台管理系统"
-])
+def zip_all(root: str) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for r, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d != "_cache"]
+            for f in files:
+                if f.startswith("~$"):
+                    continue
+                p = os.path.join(r, f)
+                z.write(p, os.path.relpath(p, root))
+    return buf.getvalue()
 
-st.sidebar.markdown("""
-<div class="disclaimer">
-<b>⚠️ 免责声明：</b><br>
-本系统纯属医学资料检索系统，不作辩证诊断，结果仅供参考，须在医生指导下使用，否则后果自负。
-</div>
-""", unsafe_allow_html=True)
 
-# ==========================================
-# 模块一：传世名方基础检索
-# ==========================================
-if page == "🔍 传世名方基础检索":
-    st.title("🔍 传世名方基础检索")
-    st.markdown("输入临床病名或症状，极速在传世医典中进行词汇检索匹配。")
-    search_term = st.text_input("💡 检索词 (例如：感冒、十二指肠溃疡)", "")
-
-    if st.button("开始常规检索", type="primary"):
-        if search_term.strip():
-            log_query("基础名方检索", search_term)
-            conn = get_connection()
-            # 限制返回100条防卡顿
-            query = "SELECT * FROM formulas WHERE 临床病名 LIKE ? OR 方剂名 LIKE ? OR 病例详情 LIKE ? LIMIT 100"
-            df_result = pd.read_sql(query, conn, params=(f'%{search_term}%', f'%{search_term}%', f'%{search_term}%'))
-            conn.close()
-
-            if df_result.empty:
-                st.info("📉 浩瀚医海，未寻得完全匹配的记载。")
-            else:
-                st.success(f"✅ 检索完毕，共得 {len(df_result)} 则良方：")
-                for _, row in df_result.iterrows():
-                    with st.container(border=True):
-                        st.markdown(f"### 🛡️ 【{row.get('方剂名', '未知')}】")
-                        st.markdown(
-                            f"**👨‍⚕️ 医家名:** {row.get('大医名', '未知')} &nbsp;&nbsp;|&nbsp;&nbsp; **🏷️ 方别:** {row.get('方别', '未知')} &nbsp;&nbsp;|&nbsp;&nbsp; **🩺 临床病名:** {row.get('临床病名', '未知')}")
-                        st.markdown(f"**📜 方剂详情:**<br>{row.get('方剂详情', '')}", unsafe_allow_html=True)
-                        st.markdown(f"**📝 临证提要:**<br>{row.get('临证提要', '无')}", unsafe_allow_html=True)
-                        st.markdown(f"**📖 病例详情:**<br>{row.get('病例详情', '无')}", unsafe_allow_html=True)
-                        if pd.notna(row.get('按语')): st.markdown(f"**💡 按语:**<br>{row.get('按语')}",
-                                                                  unsafe_allow_html=True)
-                        if pd.notna(row.get('现代研究')): st.markdown(f"**🔬 现代研究:**<br>{row.get('现代研究')}",
-                                                                      unsafe_allow_html=True)
-
-# ==========================================
-# 模块二：传世名方 AI 智能检索
-# ==========================================
-elif page == "🤖 传世名方 AI 检索":
-    st.title("🤖 AI 智能检索")
-    st.markdown(
-        "基于大模型的深度语义解析。**声明：AI 严格限定于本地《传世名方》数据库内进行比对筛查，宁缺毋滥，拒绝凭空伪造。**")
-
-    if "ai_auth" not in st.session_state:
-        st.session_state.ai_auth = False
-
-    if not st.session_state.ai_auth:
-        ai_pwd = st.text_input("🔑 请输入访问密码以启用 AI 引擎", type="password")
-        if st.button("解锁 AI 引擎"):
-            if ai_pwd == "888":
-                st.session_state.ai_auth = True
-                st.rerun()
-            else:
-                st.error("密码错误，无法启用。")
-    else:
-        conn = get_connection()
-        conf = pd.read_sql("SELECT * FROM ai_config WHERE id=1", conn).iloc[0]
-        conn.close()
-
-        api_key = conf['api_key']
-        base_url = conf['base_url']
-        model_name = conf['model_name']
-
-        condition_desc = st.text_area("✍️ 请详细描述疾病情况 (如: 胃痛时而剧烈，隐隐作痛，伴有头晕不眠，舌淡白...)",
-                                      height=150)
-
-        if st.button("🧠 提交 AI 深度匹配", type="primary"):
-            if not condition_desc.strip():
-                st.warning("请详细描述病症！")
-            elif not api_key or api_key == "":
-                st.error("⚠️ AI 尚未配置，请先进入【后台管理系统 -> AI引擎配置】设置 API Key。")
-            else:
-                with st.spinner("AI 正在典藏库中为您彻查比对...这可能需要十几秒，请稍候。"):
-                    conn = get_connection()
-                    df_all = pd.read_sql("SELECT id, 方剂名, 临床病名, 方剂详情, 病例详情 FROM formulas", conn)
-                    conn.close()
-
-                    corpus = df_all.to_dict(orient="records")
-                    corpus_str = json.dumps(corpus[:100], ensure_ascii=False)
-
-                    system_prompt = """你是一位资深严谨的中医专家。推按以下原则从我提供的《数据库》中则荐合适的方剂：
-                    规则1：你只能在我提供的<数据库语料>来选择推荐方剂，绝对不能从外部选择推荐方剂！如果确实没有合适的，请返回空列表。
-                    规则2：针对用户的【病情描述】，结合你所掌握的中医知识和经验进行辨证，根据我提供的<数据库语料>中各方剂的方剂详情、病例详情、临床病名、按语、现代研究、临证提要等全部内容对方剂证主要功效、组方原则、
-                    病例应用、实践研究等方面进行分析筛选，从我提供的<数据库语料>中推荐符合用户的【病情描述】的疾病的病理、病机、病症治疗的方剂。不要局限于文字上的绝对匹配，主要以方剂的功能适合治了所描述的病情为原则。
-                    规则3：输出严格的JSON。格式: {"matched_ids": [1, 5], "highlight_keywords": ["胃痛", "舌淡白"]}"""
-                    user_prompt = f"<数据库语料>\n{corpus_str}\n</数据库语料>\n\n用户的病情：{condition_desc}"
-
-                    try:
-                        client = OpenAI(api_key=api_key, base_url=base_url)
-                        response = client.chat.completions.create(
-                            model=model_name,
-                            messages=[{"role": "system", "content": system_prompt},
-                                      {"role": "user", "content": user_prompt}],
-                            temperature=0.1,
-                            response_format={"type": "json_object"}
-                        )
-                        ai_result = json.loads(response.choices[0].message.content)
-                        matched_ids = ai_result.get("matched_ids", [])
-                        keywords = ai_result.get("highlight_keywords", [])
-                        log_query("AI深度检索", condition_desc)
-
-                        if not matched_ids:
-                            st.info("🤖 经过系统缜密分析，本地传世名方库中暂无与此高度契合的方剂。")
-                        else:
-                            st.success(f"🤖 已为您筛出最契合的 {len(matched_ids)} 剂良方（高亮显示病机词）：")
-                            conn = get_connection()
-                            placeholders = ','.join('?' * len(matched_ids))
-                            df_matched = pd.read_sql(f"SELECT * FROM formulas WHERE id IN ({placeholders})", conn,
-                                                     params=tuple(matched_ids))
-                            conn.close()
-
-                            df_matched['id_cat'] = pd.Categorical(df_matched['id'], categories=matched_ids,
-                                                                  ordered=True)
-                            df_matched = df_matched.sort_values('id_cat')
-
-                            for _, row in df_matched.iterrows():
-                                with st.container(border=True):
-                                    st.markdown(f"### 🛡️ AI 推荐：【{row.get('方剂名', '未知')}】")
-                                    st.markdown(
-                                        f"**👨‍⚕️ 医家:** {row.get('大医名', '')} &nbsp;|&nbsp; **🏷️ 方别:** {row.get('方别', '')} &nbsp;|&nbsp; **🩺 适用病名:** {row.get('临床病名', '')}")
-                                    st.markdown(
-                                        f"**📜 方剂详情:**<br>{highlight_text(str(row.get('方剂详情', '')), keywords)}",
-                                        unsafe_allow_html=True)
-                                    st.markdown(
-                                        f"**📝 临证提要:**<br>{highlight_text(str(row.get('临证提要', '')), keywords)}",
-                                        unsafe_allow_html=True)
-                                    st.markdown(
-                                        f"**📖 病例详情:**<br>{highlight_text(str(row.get('病例详情', '')), keywords)}",
-                                        unsafe_allow_html=True)
-                                    if pd.notna(row.get('按语')) and str(row.get('按语')).strip():
-                                        st.markdown(f"**💡 按语:**<br>{highlight_text(str(row.get('按语')), keywords)}",
-                                                    unsafe_allow_html=True)
-                                    if pd.notna(row.get('现代研究')) and str(row.get('现代研究')).strip():
-                                        st.markdown(
-                                            f"**🔬 现代研究:**<br>{highlight_text(str(row.get('现代研究')), keywords)}",
-                                            unsafe_allow_html=True)
-                    except Exception as e:
-                        st.error(f"AI 调用失败，请检查配置与网络：{e}")
-
-# ==========================================
-# 模块三：养生食谱检索
-# ==========================================
-elif page == "🍲 四季养生食谱检索":
-    st.title("🍲 养生食谱数据库")
-    st.markdown("多维度精准匹配，顺应四时养生。不填的条件默认不作限制。")
-
-    with st.container(border=True):
-        col1, col2 = st.columns(2)
+def render_files() -> None:
+    files = list_output_files()
+    st.subheader("📦 产物文件")
+    if not files:
+        st.caption("还没有产物。先在上面的页面跑一个模块。")
+        return
+    st.caption(f"共 {len(files)} 个文件（云端文件不持久，请及时下载）")
+    if st.button("⬇️ 打包下载全部产物（zip）", use_container_width=True, type="primary"):
+        st.download_button("点此保存 zip",
+                           data=zip_all(_session_dir()),
+                           file_name=f"价值投资分析产物_{datetime.now():%Y%m%d_%H%M}.zip",
+                           mime="application/zip", use_container_width=True)
+    for f in files[:120]:
+        col1, col2 = st.columns([3, 1])
         with col1:
-            cailiao = st.text_input("🥦 食材用料 (如: 猪肉、山药)")
-            gongxiao = st.text_input("✨ 核心功效 (如: 健脾、润肺)")
-            nianji = st.text_input("👴 适用年龄 (如: 老年、儿童)")
+            st.markdown(f"**{f['name']}**  \n<span style='color:#888;font-size:0.8em'>"
+                        f"{f['rel']} · {f['size']/1024:.0f} KB</span>", unsafe_allow_html=True)
         with col2:
-            xingbie = st.text_input("👫 适用性别 (如: 男、女)")
-            pinlei = st.text_input("🥘 菜式品类 (如: 汤羹、粥)")
+            with open(f["path"], "rb") as fh:
+                st.download_button("下载", data=fh.read(), file_name=f["name"],
+                                   key=f"dl_{f['rel']}", use_container_width=True)
 
-        if st.button("查询养生食谱", type="primary"):
-            query = "SELECT * FROM recipes WHERE 1=1"
-            params = []
-            if cailiao: query += " AND 材料和制作 LIKE ?"; params.append(f'%{cailiao}%')
-            if gongxiao: query += " AND 功效和注意事项 LIKE ?"; params.append(f'%{gongxiao}%')
-            if nianji: query += " AND 适合年纪 LIKE ?"; params.append(f'%{nianji}%')
-            if xingbie: query += " AND 适合性别 LIKE ?"; params.append(f'%{xingbie}%')
-            if pinlei: query += " AND 品类 LIKE ?"; params.append(f'%{pinlei}%')
-            query += " LIMIT 150"  # 限制150条防卡顿
 
-            conn = get_connection()
-            df_result = pd.read_sql(query, conn, params=tuple(params))
-            conn.close()
+# ======================================================================
+# 页面
+# ======================================================================
+st.title("📈 价值投资智能分析模型 · 云端版")
+tabs = st.tabs(["🏠 总览", "🎯 海选", "📚 年报数据", "🕵️ 造假排雷",
+                "📊 16维度", "🤖 企业AI", "💰 好价估值", "⚙️ 设置", "📦 产物"])
 
-            log_query("食谱检索", f"{cailiao}|{gongxiao}")
+# ---------------- 总览 ----------------
+with tabs[0]:
+    st.markdown("#### 一键跑完整流水线")
+    st.caption("顺序：海选公司 → 年报数据搜索汇总 → 造假排雷 → 16维度 → 企业AI深度 → 好价估值")
+    presets = {
+        "全部（推荐）": ["haixuan", "report", "fraud", "dim16", "enterprise", "valuation"],
+        "跳过海选（用已有名单）": ["report", "fraud", "dim16", "enterprise", "valuation"],
+        "只要数据与财务分析": ["haixuan", "report", "fraud", "dim16"],
+        "只要好价估值": ["valuation"],
+    }
+    pick = st.selectbox("运行范围", list(presets.keys()), index=0)
+    with st.expander("常用参数（可留默认）"):
+        c1, c2 = st.columns(2)
+        with c1:
+            pool_size = st.number_input("海选候选池大小（按市值降序取前 N 只）", 20, 1000, 200, 20,
+                                        help="越大越全，但更慢。手机端建议 100~300。")
+            years_back = st.number_input("年报回溯年数", 2, 10, 5, 1)
+        with c2:
+            manual = st.text_area("手工指定公司（每行一个，可填代码或简称；留空则用海选结果）",
+                                  height=90, placeholder="600887\n605499\n重庆啤酒")
+    if st.button("🚀 开始运行", type="primary", use_container_width=True):
+        targets = []
+        for line in (manual or "").replace("，", ",").splitlines():
+            s = line.strip()
+            if s:
+                targets.append({"code": s if s.isdigit() else "", "name": s})
+        params = {
+            "haixuan": {"pool_size": int(pool_size)},
+            "report": {"years_back": int(years_back),
+                       "targets": [t for t in targets if t.get("code")] or None},
+            "enterprise": {},
+        }
+        start_job(presets[pick], params)
+    snap = render_job_progress()
+    if snap and snap.get("result"):
+        st.success("任务结束，见下方各模块页面与「产物」页。")
+        st.json(snap["result"], expanded=False)
 
-            if df_result.empty:
-                st.info("📉 未寻得符合全部条件的食谱，请尝试精简检索词。")
-            else:
-                st.success(f"✅ 寻得 {len(df_result)} 道养生佳肴：")
-                for _, row in df_result.iterrows():
-                    with st.expander(f"🍲 【{row.get('菜名', '未知')}】 | 类: {row.get('品类', '')}"):
-                        st.markdown(f"**🥦 材料与制作:**\n {row.get('材料和制作', '')}")
-                        st.markdown(f"**✨ 功效与禁忌:**\n {row.get('功效和注意事项', '')}")
-                        st.markdown("---")
-                        c1, c2, c3 = st.columns(3)
-                        c1.markdown(f"**👴 年纪:** {row.get('适合年纪', '老少皆宜')}")
-                        c2.markdown(f"**👫 性别:** {row.get('适合性别', '男女皆宜')}")
-                        c3.markdown(f"**🌸 季节:** {row.get('适合季节', '四季皆宜')}")
+# ---------------- 海选 ----------------
+with tabs[1]:
+    st.markdown("#### 🎯 海选公司（免费数据源）")
+    st.caption("用 AkShare 全市场数据按条件筛选，替代原桌面版的问财浏览器抓取。")
+    cfg = _cfg()
+    preset = st.selectbox("条件模板", list(cfg_mod.HAIXUAN_PRESETS.keys()), index=0)
+    query = st.text_area("筛选条件（可自由编辑）", value=cfg_mod.HAIXUAN_PRESETS[preset], height=90)
+    pool = st.slider("候选池大小", 20, 1000, 200, 20)
+    if st.button("开始海选", type="primary", use_container_width=True):
+        start_job(["haixuan"], {"haixuan": {"query": query, "pool_size": int(pool)}})
+    snap = render_job_progress()
+    if snap and snap.get("result"):
+        res = (snap["result"].get("results") or {}).get("haixuan") or {}
+        stocks = res.get("stocks") or []
+        st.success(f"入选 {len(stocks)} 只（候选 {res.get('candidates')} 只）")
+        if stocks:
+            df = pd.DataFrame(stocks)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.download_button("下载《海选公司汇总表》CSV",
+                               df.to_csv(index=False).encode("utf-8-sig"),
+                               file_name="海选公司汇总表.csv", mime="text/csv")
+        detail = res.get("detail") or []
+        if detail:
+            with st.expander("查看全部候选明细（含未通过原因）"):
+                st.dataframe(pd.DataFrame(detail), use_container_width=True, hide_index=True)
 
-# ==========================================
-# 模块四：后台管理系统
-# ==========================================
-elif page == "⚙️ 典藏后台管理系统":
-    st.title("⚙️ 系统中枢及数据管理")
+# ---------------- 年报数据 ----------------
+with tabs[2]:
+    st.markdown("#### 📚 年报数据搜索汇总")
+    st.caption("用 AkShare（新浪财报 / 东财分红 / 同花顺）汇总三大表、分红、员工数据，"
+               "产出与原《年报提取表》《统一整合输出》完全一致的表结构。")
+    manual = st.text_area("目标公司（每行一个：代码或简称；留空则读海选结果）", height=110,
+                          placeholder="600887\n605499\n603156")
+    c1, c2 = st.columns(2)
+    with c1:
+        sy = st.number_input("起始年份", 2000, 2030, datetime.now().year - 4)
+    with c2:
+        ey = st.number_input("结束年份", 2000, 2030, datetime.now().year)
+    with st.expander("高级：当年报汇总遇到同名多文件时，行业分组与同行"):
+        inc_peers = st.checkbox("同时生成同行排列表（同行前三）", value=True)
+    if st.button("开始汇总", type="primary", use_container_width=True):
+        tks = []
+        for line in (manual or "").replace("，", ",").splitlines():
+            s = line.strip()
+            if s:
+                tks.append({"code": s if s.isdigit() else "", "name": s})
+        start_job(["report"], {"report": {"targets": tks or None, "start_year": int(sy),
+                                          "end_year": int(ey), "include_peers": inc_peers}})
+    snap = render_job_progress()
+    if snap and snap.get("result"):
+        res = (snap["result"].get("results") or {}).get("report") or {}
+        st.success(f"生成 {len(res.get('files') or [])} 个文件")
+        comps = res.get("companies") or []
+        if comps:
+            st.dataframe(pd.DataFrame(comps), use_container_width=True, hide_index=True)
 
-    if "admin_auth" not in st.session_state:
-        st.session_state.admin_auth = False
+# ---------------- 造假排雷 ----------------
+with tabs[3]:
+    st.markdown("#### 🕵️ 财务造假排雷（18 项）")
+    st.caption("读取《统一整合输出》逐公司逐年度跑 18 条判断，产出《深度排雷报告.xlsx》。")
+    cfg = _cfg()
+    st.caption("阈值可在「设置」页调整；这里点一下就用当前阈值运行。")
+    if st.button("开始排雷", type="primary", use_container_width=True):
+        start_job(["fraud"], {"fraud": {}})
+    snap = render_job_progress()
+    if snap and snap.get("result"):
+        res = (snap["result"].get("results") or {}).get("fraud") or {}
+        comps = res.get("companies") or []
+        if comps:
+            st.dataframe(pd.DataFrame(comps), use_container_width=True, hide_index=True)
 
-    if not st.session_state.admin_auth:
-        pwd = st.text_input("🔑 请输入系统超级管理员密码", type="password")
-        if st.button("进入中枢"):
-            if pwd == "123":
-                st.session_state.admin_auth = True
-                st.rerun()
-            else:
-                st.error("密码错误！")
-    else:
-        st.success("✅ 身份验证通过：田 夫 (为了系统流畅，请规范操作)")
+# ---------------- 16维度 ----------------
+with tabs[4]:
+    st.markdown("#### 📊 16 维度同行对比分析")
+    st.caption("按行业把同行公司放在一起，逐维度打分并给出投资建议。")
+    if st.button("开始分析", type="primary", use_container_width=True):
+        start_job(["dim16"], {"dim16": {}})
+    snap = render_job_progress()
+    if snap and snap.get("result"):
+        res = (snap["result"].get("results") or {}).get("dim16") or {}
+        st.success(f"生成 {len(res.get('files') or [])} 个行业报告")
+        if res.get("industries"):
+            st.write("行业：" + "、".join(map(str, res["industries"])))
 
-        tab_stat, tab_ai, tab_edit, tab_import, tab_danger = st.tabs([
-            "📊 数据统计", "🧠 AI 引擎配置", "✏️ 数据维护(增删)", "📁 批量导入", "⚠️ 高危操作"
-        ])
+# ---------------- 企业AI ----------------
+with tabs[5]:
+    st.markdown("#### 🤖 企业 AI 深度分析")
+    st.caption("把本项目汇总的财务表格 + 联网检索情报喂给 LLM，逐家生成企业深度报告。"
+               "需要在「设置」里填 API Key。")
+    cfg = _cfg()
+    ai = cfg.get("ai") or {}
+    st.caption(f"当前模型：`{ai.get('model','-')}` · 接口：`{ai.get('base_url','-')}` · "
+               f"Key：{'已配置' if (ai.get('api_key') or '').strip() else '未配置'}")
+    tmpl = st.text_area("提示词模板（{company} / {competitors} / {web_info} / {doc_info} 占位符）",
+                        value=ai.get("template") or cfg_mod.DEFAULT_ENTERPRISE_PROMPT, height=160)
+    if st.button("开始生成", type="primary", use_container_width=True):
+        start_job(["enterprise"], {"enterprise": {"template": tmpl, "ai": ai}})
+    snap = render_job_progress()
+    if snap and snap.get("result"):
+        res = (snap["result"].get("results") or {}).get("enterprise") or {}
+        if res.get("skipped"):
+            st.warning(res.get("reason"))
+        else:
+            st.success(f"生成 {len(res.get('reports') or [])} 份报告")
+        if res.get("errors"):
+            with st.expander("错误明细"):
+                st.write(res["errors"])
 
-        with tab_stat:
-            st.subheader("平台数据态势")
-            conn = get_connection()
-            num_formulas = pd.read_sql("SELECT COUNT(*) as c FROM formulas", conn).iloc[0]['c']
-            num_recipes = pd.read_sql("SELECT COUNT(*) as c FROM recipes", conn).iloc[0]['c']
-            num_logs = pd.read_sql("SELECT COUNT(*) as c FROM query_logs", conn).iloc[0]['c']
-            sc1, sc2, sc3 = st.columns(3)
-            sc1.metric("📚 传世名方总数", num_formulas)
-            sc2.metric("🍲 养生食谱总数", num_recipes)
-            sc3.metric("👣 历史总检索次数", num_logs)
+# ---------------- 好价估值 ----------------
+with tabs[6]:
+    st.markdown("#### 💰 好价估值分析")
+    st.caption("现价 / 市盈率(TTM) / **严格 TTM 动态股息率** → 好价格判断（规则与原程序一致）。")
+    cfg = _cfg()
+    val = cfg.get("valuation") or cfg_mod.VALUATION_DEFAULTS
+    manual = st.text_area("估值标的（每行一个：代码或简称；留空则读年报汇总出的名单）",
+                          height=100, placeholder="600887\n605499")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        sz = st.checkbox("A股大盘PE", value=bool(val.get("sz_pe", True)))
+        cn = st.checkbox("中国10Y国债", value=bool(val.get("cn_10y", True)))
+    with c2:
+        hk = st.checkbox("恒生指数PE", value=bool(val.get("hs_pe", True)))
+        us = st.checkbox("美国10Y国债", value=bool(val.get("us_10y", True)))
+    with c3:
+        sp = st.checkbox("标普500PE", value=bool(val.get("sp_pe", True)))
+        fed = st.checkbox("美联储利率", value=bool(val.get("fed", True)))
+    if st.button("开始估值", type="primary", use_container_width=True):
+        tks = [{"code": s.strip() if s.strip().isdigit() else "", "name": s.strip()}
+               for s in (manual or "").splitlines() if s.strip()]
+        vcfg = {"sz_pe": sz, "hs_pe": hk, "sp_pe": sp, "cn_10y": cn, "us_10y": us, "fed": fed,
+                "targets": [t for t in tks if t.get("code")] or None}
+        start_job(["valuation"], {"valuation": {"valuation": vcfg}})
+    snap = render_job_progress()
+    if snap and snap.get("result"):
+        res = (snap["result"].get("results") or {}).get("valuation") or {}
+        recs = res.get("records") or []
+        if recs:
+            df = pd.DataFrame(recs)
+            keep = [c for c in ["分类", "名称/代码", "现价", "当前PE(TTM)", "动态股息率",
+                                "判断结果", "反推好价格上限"] if c in df.columns]
+            st.dataframe(df[keep], use_container_width=True, hide_index=True)
+        macro = res.get("macro") or {}
+        if macro:
+            with st.expander("宏观与大盘指标"):
+                st.json(macro)
 
-            st.markdown("### 📝 最近访客检索日志")
-            logs_df = pd.read_sql(
-                "SELECT id as 序号, query_time as 检索时间, search_type as 检索模块, keyword as 检索词 FROM query_logs ORDER BY id DESC LIMIT 50",
-                conn)
-            st.dataframe(logs_df, use_container_width=True)
-            conn.close()
+# ---------------- 设置 ----------------
+with tabs[7]:
+    st.markdown("#### ⚙️ 设置")
+    cfg = _cfg()
+    sub = st.tabs(["AI 接口", "造假排雷阈值", "16维度参数", "数据源"])
 
-        with tab_ai:
-            st.subheader("🤖 AI 模型接口参数统管")
-            conn = get_connection()
-            conf = pd.read_sql("SELECT * FROM ai_config WHERE id=1", conn).iloc[0]
-            conn.close()
+    with sub[0]:
+        ai = dict(cfg.get("ai") or {})
+        ai["base_url"] = st.text_input("API 地址", value=ai.get("base_url", cfg_mod.AI_DEFAULTS["base_url"]))
+        ai["api_key"] = st.text_input("API Key", value=ai.get("api_key", ""), type="password")
+        ai["model"] = st.text_input("模型", value=ai.get("model", cfg_mod.AI_DEFAULTS["model"]))
+        ai["temperature"] = st.slider("temperature", 0.0, 1.0, float(ai.get("temperature", 0.3)), 0.05)
+        if st.button("保存 AI 设置", use_container_width=True):
+            cfg["ai"] = ai
+            cfg_mod.save_user_config(_session_dir(), cfg)
+            st.session_state.user_config = cfg
+            st.success("已保存")
 
-            # 取消form结构，使保存按钮稳定触发
-            new_api_key = st.text_input("🔑 API Key", value=conf['api_key'], type="password")
-            new_base_url = st.text_input("🌐 Base URL (接口地址)", value=conf['base_url'])
-            new_model = st.text_input("🧠 调用的模型名称 (Model Name)", value=conf['model_name'])
-            if st.button("💾 保存更新 AI 配置", type="primary"):
-                conn = get_connection()
-                conn.execute("UPDATE ai_config SET api_key=?, base_url=?, model_name=? WHERE id=1",
-                             (new_api_key, new_base_url, new_model))
-                conn.commit()
-                conn.close()
-                st.success("✅ AI 接口配置已更新生效！")
-
-        with tab_edit:
-            st.subheader("✏️ 数据精确定向维护")
-            st.warning("⚠️ 数据库体积庞大，全量铺开会导致浏览器崩溃卡死。请通过下方表单精确完成录入、修改与删除。")
-
-            action_type = st.radio("请选择执行的操作", ["➕ 新增记录", "🔍 搜索与修改", "🗑️ 定向删除"], horizontal=True)
-
-            if action_type == "➕ 新增记录":
-                tbl = st.selectbox("目标表", ["formulas (名方)", "recipes (食谱)"])
-                with st.form("insert_f"):
-                    if "formulas" in tbl:
-                        st.info("正在录入：传世名方")
-                        f_name = st.text_input("方剂名*")
-                        b_name = st.text_input("临床病名*")
-                        d_name = st.text_input("大医名")
-                        det = st.text_area("方剂详情")
-                        cas = st.text_area("病例详情")
-                        sumry = st.text_area("临证提要")
-                        if st.form_submit_button("保存至名方库"):
-                            if f_name and b_name:
-                                conn = get_connection()
-                                conn.execute(
-                                    "INSERT INTO formulas (方剂名, 临床病名, 大医名, 方剂详情, 病例详情, 临证提要) VALUES (?,?,?,?,?,?)",
-                                    (f_name, b_name, d_name, det, cas, sumry))
-                                conn.commit()
-                                conn.close()
-                                st.success("新增成功！")
-                            else:
-                                st.error("必填项不可为空！")
-                    else:
-                        st.info("正在录入：养生食谱")
-                        r_name = st.text_input("菜名*")
-                        r_type = st.text_input("品类")
-                        r_mat = st.text_area("材料和制作")
-                        r_eff = st.text_area("功效和注意事项")
-                        if st.form_submit_button("保存至食谱库"):
-                            if r_name:
-                                conn = get_connection()
-                                conn.execute(
-                                    "INSERT INTO recipes (菜名, 品类, 材料和制作, 功效和注意事项) VALUES (?,?,?,?)",
-                                    (r_name, r_type, r_mat, r_eff))
-                                conn.commit()
-                                conn.close()
-                                st.success("新增成功！")
-                            else:
-                                st.error("菜名为必填项！")
-
-            elif action_type == "🔍 搜索与修改":
-                st.markdown("通过关键字定位数据并进行编辑更新。")
-                edit_tbl = st.selectbox("修改目标表", ["formulas (名方)", "recipes (食谱)"])
-                real_tbl = "formulas" if "formulas" in edit_tbl else "recipes"
-
-                search_kw = st.text_input("🔍 输入检索词 (如方名、菜名、病名等以查找)")
-
-                if search_kw.strip():
-                    conn = get_connection()
-                    if real_tbl == "formulas":
-                        query = "SELECT id, 方剂名, 临床病名, 大医名 FROM formulas WHERE 方剂名 LIKE ? OR 临床病名 LIKE ? LIMIT 20"
-                    else:
-                        query = "SELECT id, 菜名, 品类 FROM recipes WHERE 菜名 LIKE ? OR 功效和注意事项 LIKE ? LIMIT 20"
-
-                    search_res = pd.read_sql(query, conn, params=(f'%{search_kw}%', f'%{search_kw}%'))
-                    conn.close()
-
-                    if search_res.empty:
-                        st.info("未找到匹配的记录。")
-                    else:
-                        st.write(f"找到 {len(search_res)} 条关联记录 (最多显示前20条)：")
-                        st.dataframe(search_res, hide_index=True)
-
-                        edit_id = st.number_input("请输入您要修改的记录 ID", min_value=0, step=1, value=0)
-
-                        if edit_id > 0:
-                            conn = get_connection()
-                            record = pd.read_sql(f"SELECT * FROM {real_tbl} WHERE id=?", conn, params=(edit_id,))
-                            conn.close()
-
-                            if not record.empty:
-                                row = record.iloc[0]
-                                with st.form("update_form"):
-                                    if real_tbl == "formulas":
-                                        st.info(f"正在修改 ID: {edit_id} 的名方")
-                                        u_f_name = st.text_input("方剂名*", value=row.get('方剂名') if pd.notna(
-                                            row.get('方剂名')) else "")
-                                        u_b_name = st.text_input("临床病名*", value=row.get('临床病名') if pd.notna(
-                                            row.get('临床病名')) else "")
-                                        u_d_name = st.text_input("大医名", value=row.get('大医名') if pd.notna(
-                                            row.get('大医名')) else "")
-                                        u_det = st.text_area("方剂详情", value=row.get('方剂详情') if pd.notna(
-                                            row.get('方剂详情')) else "")
-                                        u_cas = st.text_area("病例详情", value=row.get('病例详情') if pd.notna(
-                                            row.get('病例详情')) else "")
-                                        u_sumry = st.text_area("临证提要", value=row.get('临证提要') if pd.notna(
-                                            row.get('临证提要')) else "")
-
-                                        if st.form_submit_button("💾 保存名方修改", type="primary"):
-                                            if u_f_name and u_b_name:
-                                                conn = get_connection()
-                                                conn.execute(
-                                                    "UPDATE formulas SET 方剂名=?, 临床病名=?, 大医名=?, 方剂详情=?, 病例详情=?, 临证提要=? WHERE id=?",
-                                                    (u_f_name, u_b_name, u_d_name, u_det, u_cas, u_sumry, edit_id))
-                                                conn.commit()
-                                                conn.close()
-                                                st.success("名方记录修改成功！")
-                                            else:
-                                                st.error("必填项不可为空！")
-                                    else:
-                                        st.info(f"正在修改 ID: {edit_id} 的食谱")
-                                        u_r_name = st.text_input("菜名*", value=row.get('菜名') if pd.notna(
-                                            row.get('菜名')) else "")
-                                        u_r_type = st.text_input("品类", value=row.get('品类') if pd.notna(
-                                            row.get('品类')) else "")
-                                        u_r_mat = st.text_area("材料和制作", value=row.get('材料和制作') if pd.notna(
-                                            row.get('材料和制作')) else "")
-                                        u_r_eff = st.text_area("功效和注意事项",
-                                                               value=row.get('功效和注意事项') if pd.notna(
-                                                                   row.get('功效和注意事项')) else "")
-
-                                        if st.form_submit_button("💾 保存食谱修改", type="primary"):
-                                            if u_r_name:
-                                                conn = get_connection()
-                                                conn.execute(
-                                                    "UPDATE recipes SET 菜名=?, 品类=?, 材料和制作=?, 功效和注意事项=? WHERE id=?",
-                                                    (u_r_name, u_r_type, u_r_mat, u_r_eff, edit_id))
-                                                conn.commit()
-                                                conn.close()
-                                                st.success("食谱记录修改成功！")
-                                            else:
-                                                st.error("菜名为必填项！")
-                            else:
-                                st.warning("未找到该 ID 对应的记录，请核对后输入。")
-
-            elif action_type == "🗑️️ 定向删除":
-                st.markdown("通过 ID 精确定位数据并删除，确保系统响应极速不卡顿。")
-                del_tbl = st.selectbox("目标表", ["formulas", "recipes"])
-                del_id = st.number_input(f"请输入要删除的 {del_tbl} 记录的 ID", min_value=1, step=1)
-
-                # 预览要删除的数据
-                conn = get_connection()
-                preview = pd.read_sql(f"SELECT * FROM {del_tbl} WHERE id=?", conn, params=(del_id,))
-                conn.close()
-                if not preview.empty:
-                    st.dataframe(preview)
-                    if st.button("🚨 确认删除此记录"):
-                        conn = get_connection()
-                        conn.execute(f"DELETE FROM {del_tbl} WHERE id=?", (del_id,))
-                        conn.commit()
-                        conn.close()
-                        st.success("已成功删除！")
-                        st.rerun()
+    with sub[1]:
+        fp = dict(cfg.get("fraud_params") or cfg_mod.default_fraud_params())
+        meta = {k: v["name"] for k, v in cfg_mod.FRAUD_PARAM_DEFS.items()}
+        cols = st.columns(2)
+        for i, (k, v) in enumerate(fp.items()):
+            with cols[i % 2]:
+                if isinstance(v, str):
+                    fp[k] = st.text_input(meta.get(k, k), value=v, key=f"fp_{k}")
+                elif isinstance(v, int):
+                    fp[k] = st.number_input(meta.get(k, k), value=int(v), step=1, key=f"fp_{k}")
                 else:
-                    st.info("未找到此 ID 对应的数据。")
-        with tab_import:
-            st.subheader("📥 Excel 批量智能导入")
-            uploaded_file = st.file_uploader("请上传待导入的 Excel 文件 (.xlsx)", type=["xlsx", "xls"])
-            target_table = st.radio("导入目标库", ["formulas", "recipes"])
+                    fp[k] = st.number_input(meta.get(k, k), value=float(v), step=0.1,
+                                            format="%.4f", key=f"fp_{k}")
+        if st.button("保存排雷阈值", use_container_width=True):
+            cfg["fraud_params"] = fp
+            cfg_mod.save_user_config(_session_dir(), cfg)
+            st.session_state.user_config = cfg
+            st.success("已保存")
 
-            if uploaded_file is not None:
-                xls = pd.ExcelFile(uploaded_file)
-                st.write(f"📂 检测到 {len(xls.sheet_names)} 个工作表")
-                if st.button("开始批量读取并智能去重导入", type="primary"):
-                    try:
-                        conn = get_connection()
-                        old_df = pd.read_sql(f"SELECT * FROM {target_table}", conn)
-                        df_list = [pd.read_excel(xls, sheet_name=s) for s in xls.sheet_names]
-                        new_data = pd.concat(df_list, ignore_index=True)
-                        combined_df = pd.concat([old_df, new_data], ignore_index=True)
-
-                        if target_table == "formulas" and '方剂名' in combined_df.columns:
-                            combined_df.drop_duplicates(subset=['方剂名', '临床病名'], keep='last', inplace=True)
-                        elif target_table == "recipes" and '菜名' in combined_df.columns:
-                            combined_df.drop_duplicates(subset=['菜名'], keep='last', inplace=True)
-
-                        combined_df.to_sql(target_table, conn, if_exists="replace", index=False)
-                        conn.close()
-                        st.success(f"🎉 导入成功！过滤重复后库中共存有 {len(combined_df)} 条数据。")
-                    except Exception as e:
-                        st.error(f"导入出错，可能是文件格式不匹配: {e}")
-
-        with tab_danger:
-            st.subheader("☢️ 高危指令区")
-            clear_table = st.selectbox("选择要物理清空的数据表", ["formulas", "recipes", "query_logs"])
-            confirm_text = st.text_input(f"如果您确切明白后果，请在此处手动输入：确认清空{clear_table}")
-            if st.button("🚨 强制执行一键清空"):
-                if confirm_text == f"确认清空{clear_table}":
-                    conn = get_connection()
-                    conn.execute(f"DELETE FROM {clear_table}")
-                    conn.commit()
-                    conn.close()
-                    st.success(f"💀 核心指令已下达，【{clear_table}】已被永久清空。")
+    with sub[2]:
+        d16 = dict(cfg.get("config_16dim") or cfg_mod.default_16dim_config())
+        meta16 = {k: v for k, v in cfg_mod.FULL_CONFIG.items()}
+        cols = st.columns(2)
+        for i, (k, v) in enumerate(d16.items()):
+            desc = meta16.get(k, {}).get("desc", k)
+            with cols[i % 2]:
+                if isinstance(v, str):
+                    d16[k] = st.text_input(desc, value=v, key=f"d16_{k}")
                 else:
-                    st.warning("防误触锁生效：口令不正确。")
+                    d16[k] = st.number_input(desc, value=float(v), step=0.01,
+                                             format="%.4f", key=f"d16_{k}")
+        if st.button("保存 16 维度参数", use_container_width=True):
+            cfg["config_16dim"] = d16
+            cfg_mod.save_user_config(_session_dir(), cfg)
+            st.session_state.user_config = cfg
+            st.success("已保存")
+
+    with sub[3]:
+        ds = dict(cfg.get("data_source") or cfg_mod.DATA_SOURCE_DEFAULTS)
+        ds["years_back"] = st.number_input("默认回溯年数", 2, 10, int(ds.get("years_back", 5)))
+        ds["max_peers"] = st.number_input("同行取前 N 名", 1, 10, int(ds.get("max_peers", 3)))
+        ds["request_timeout"] = st.number_input("请求超时(秒)", 5, 120, int(ds.get("request_timeout", 20)))
+        ds["sleep_between"] = st.number_input("请求间隔(秒)", 0.0, 3.0, float(ds.get("sleep_between", 0.35)), 0.05)
+        st.info("本版本全部使用免费数据源：AkShare（新浪/东财/同花顺/巨潮）、腾讯行情、新浪行情。"
+                "Tushare 为可选（需 token）。")
+        if st.button("保存数据源设置", use_container_width=True):
+            cfg["data_source"] = ds
+            cfg_mod.save_user_config(_session_dir(), cfg)
+            st.session_state.user_config = cfg
+            st.success("已保存")
+
+# ---------------- 产物 ----------------
+with tabs[8]:
+    render_files()
+    st.divider()
+    st.caption("提示：Streamlit Community Cloud 的磁盘在重启后会清空，重要结果请及时下载。")
