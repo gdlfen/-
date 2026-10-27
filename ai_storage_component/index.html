@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Settings Storage</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 0;
+      overflow: hidden;
+      background: transparent;
+    }
+  </style>
+</head>
+<body>
+<script>
+(function () {
+  "use strict";
+
+  var STORAGE_KEY = "tcm_ai_settings_v1";
+  var lastActionId = null;
+  var lastSent = null;
+
+  function readSettings() {
+    try {
+      var raw = window.localStorage.getItem(STORAGE_KEY);
+      if (!raw) {
+        return null;
+      }
+      var parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch (error) {
+      return null;
+    }
+    return null;
+  }
+
+  function send(value) {
+    var serialized = JSON.stringify(value);
+    if (serialized === lastSent) {
+      return;
+    }
+    lastSent = serialized;
+    window.parent.postMessage({
+      isStreamlitMessage: true,
+      type: "streamlit:setComponentValue",
+      value: value,
+      dataType: "json"
+    }, "*");
+  }
+
+  function handleRender(event) {
+    if (!event.data || event.data.type !== "streamlit:render") {
+      return;
+    }
+    var args = event.data.args || {};
+    var action = args.action || "load";
+    var actionId = args.action_id;
+
+    if (action === "save") {
+      if (actionId === lastActionId) {
+        return;
+      }
+      var payload = args.payload;
+      var ok = true;
+      var error = "";
+      try {
+        if (payload && typeof payload === "object") {
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+        } else {
+          ok = false;
+          error = "no payload";
+        }
+      } catch (e) {
+        ok = false;
+        error = String(e && e.message ? e.message : e);
+      }
+      lastActionId = actionId;
+      send({settings: readSettings(), ack: actionId, ok: ok, error: error});
+      return;
+    }
+
+    if (action === "clear") {
+      if (actionId === lastActionId) {
+        return;
+      }
+      var clearOk = true;
+      var clearError = "";
+      try {
+        window.localStorage.removeItem(STORAGE_KEY);
+      } catch (e) {
+        clearOk = false;
+        clearError = String(e && e.message ? e.message : e);
+      }
+      lastActionId = actionId;
+      send({settings: null, ack: actionId, ok: clearOk, error: clearError});
+      return;
+    }
+
+    send({settings: readSettings(), ack: null, ok: true, error: ""});
+  }
+
+  window.addEventListener("message", handleRender);
+  window.parent.postMessage({
+    isStreamlitMessage: true,
+    type: "streamlit:componentReady",
+    apiVersion: 1
+  }, "*");
+  window.parent.postMessage({
+    isStreamlitMessage: true,
+    type: "streamlit:setFrameHeight",
+    height: 0
+  }, "*");
+})();
+</script>
+</body>
+</html>
