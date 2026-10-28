@@ -31,6 +31,8 @@ st.markdown("""
 DB_FILE = "tcm_database.db"
 ZIP_FILE = "tcm_database.zip"
 DB_SCHEMA_VERSION = 4  # 数据库结构变更时递增，使 Streamlit 资源缓存失效并重新执行迁移
+VERIF_PAGE_SIZE = 20  # 各种验方检索每页条数
+FORMULA_PAGE_SIZE = 20  # 传世名方基础检索每页条数
 
 FORMULA_TABLE = "formulas"
 RECIPE_TABLE = "recipes"
@@ -569,6 +571,8 @@ def load_verif_index():
 
 def clear_search_caches():
     st.cache_data.clear()
+    st.session_state.pop("verif_search_state", None)
+    st.session_state.pop("formula_search_state", None)
 
 
 # --- 2. 侧边栏与路由 ---
@@ -628,40 +632,97 @@ if page == "🔍 传世名方基础检索":
             submitted = st.button("开始常规检索", type="primary", key="formula_select_search")
 
     if submitted:
-        if not search_term or not str(search_term).strip():
+        term = str(search_term).strip() if search_term else ""
+        if not term:
+            st.session_state.pop("formula_search_state", None)
             st.warning("请先输入或选择疾病名称。")
         else:
-            search_term = str(search_term).strip()
-            log_query("基础名方检索", search_term)
+            log_query("基础名方检索", term)
+            if search_mode == "方式一：输入疾病名称检索":
+                conn = get_connection()
+                try:
+                    total = pd.read_sql(
+                        "SELECT COUNT(*) AS c FROM formulas WHERE 临床病名 LIKE ?",
+                        conn,
+                        params=(f"%{term}%",),
+                    ).iloc[0]["c"]
+                finally:
+                    conn.close()
+                st.session_state["formula_search_state"] = {
+                    "mode": search_mode,
+                    "term": term,
+                    "ids": None,
+                    "total": int(total),
+                    "page": 1,
+                }
+            else:
+                ids = sorted(set(load_disease_index().get(term, [])))
+                st.session_state["formula_search_state"] = {
+                    "mode": search_mode,
+                    "term": term,
+                    "ids": ids,
+                    "total": len(ids),
+                    "page": 1,
+                }
+
+    state = st.session_state.get("formula_search_state")
+    if state:
+        total = int(state.get("total", 0))
+        total_pages = max(1, (total + FORMULA_PAGE_SIZE - 1) // FORMULA_PAGE_SIZE)
+        page = max(1, min(int(state.get("page", 1)), total_pages))
+        state["page"] = page
+
+        st.caption(f"当前检索：{state.get('mode')} · {state.get('term')}")
+
+        if total == 0:
+            st.info("📉 浩瀚医海，未寻得完全匹配的记载。")
+        else:
+            offset = (page - 1) * FORMULA_PAGE_SIZE
             conn = get_connection()
             try:
-                if search_mode == "方式一：输入疾病名称检索":
+                if state.get("mode") == "方式一：输入疾病名称检索":
                     # 只检索“临床病名”列，不再匹配方剂名、病例详情等其它列
                     df_result = pd.read_sql(
-                        "SELECT * FROM formulas WHERE 临床病名 LIKE ? LIMIT 100",
+                        "SELECT * FROM formulas WHERE 临床病名 LIKE ? "
+                        "ORDER BY id LIMIT ? OFFSET ?",
                         conn,
-                        params=(f"%{search_term}%",),
+                        params=(f"%{state.get('term', '')}%", FORMULA_PAGE_SIZE, offset),
                     )
                 else:
-                    matched_ids = load_disease_index().get(search_term, [])[:100]
-                    if not matched_ids:
-                        df_result = pd.DataFrame()
-                    else:
-                        placeholders = ",".join("?" * len(matched_ids))
+                    page_ids = (state.get("ids") or [])[offset:offset + FORMULA_PAGE_SIZE]
+                    if page_ids:
+                        placeholders = ",".join("?" * len(page_ids))
                         df_result = pd.read_sql(
-                            f"SELECT * FROM formulas WHERE id IN ({placeholders}) LIMIT 100",
+                            f"SELECT * FROM formulas WHERE id IN ({placeholders}) ORDER BY id",
                             conn,
-                            params=tuple(matched_ids),
+                            params=tuple(page_ids),
                         )
+                    else:
+                        df_result = pd.DataFrame()
             finally:
                 conn.close()
 
-            if df_result.empty:
-                st.info("📉 浩瀚医海，未寻得完全匹配的记载。")
-            else:
-                st.success(f"✅ 检索完毕，共得 {len(df_result)} 则良方：")
-                for _, row in df_result.iterrows():
-                    render_formula_card(row)
+            st.success(
+                f"✅ 共检索到 {total} 则良方，当前第 {page}/{total_pages} 页（每页 {FORMULA_PAGE_SIZE} 条）：")
+            for _, row in df_result.iterrows():
+                render_formula_card(row)
+
+            if total_pages > 1:
+                prev_col, info_col, next_col = st.columns([1, 2, 1])
+                with prev_col:
+                    if st.button("⬅️ 上一页", disabled=page <= 1, key="formula_prev_page"):
+                        state["page"] = page - 1
+                        st.session_state["formula_search_state"] = state
+                        st.rerun()
+                with info_col:
+                    st.markdown(
+                        f"<div style='text-align:center;padding-top:6px'>第 {page} / {total_pages} 页</div>",
+                        unsafe_allow_html=True)
+                with next_col:
+                    if st.button("下一页 ➡️", disabled=page >= total_pages, key="formula_next_page"):
+                        state["page"] = page + 1
+                        st.session_state["formula_search_state"] = state
+                        st.rerun()
 
 # ==========================================
 # 模块二：传世名方 AI 智能检索
@@ -902,40 +963,100 @@ elif page == "🧾 各种验方检索":
             submitted = st.button("开始验方检索", type="primary", key="verif_select_search")
 
     if submitted:
-        if not search_term or not str(search_term).strip():
+        term = str(search_term).strip() if search_term else ""
+        if not term:
+            st.session_state.pop("verif_search_state", None)
             st.warning("请先输入或选择疾病名称。")
         else:
-            search_term = str(search_term).strip()
-            log_query("各种验方检索", search_term)
+            log_query("各种验方检索", term)
+            if search_mode == "方式一：输入疾病名称检索":
+                conn = get_connection()
+                try:
+                    like = f"%{term}%"
+                    total = pd.read_sql(
+                        f'SELECT COUNT(*) AS c FROM "{VERIF_TABLE}" '
+                        "WHERE 主治疾病 LIKE ? OR 方名 LIKE ? OR 症状 LIKE ?",
+                        conn,
+                        params=(like, like, like),
+                    ).iloc[0]["c"]
+                finally:
+                    conn.close()
+                st.session_state["verif_search_state"] = {
+                    "mode": search_mode,
+                    "term": term,
+                    "ids": None,
+                    "total": int(total),
+                    "page": 1,
+                }
+            else:
+                ids = sorted(set(load_verif_index().get(term, [])))
+                st.session_state["verif_search_state"] = {
+                    "mode": search_mode,
+                    "term": term,
+                    "ids": ids,
+                    "total": len(ids),
+                    "page": 1,
+                }
+
+    state = st.session_state.get("verif_search_state")
+    if state:
+        total = int(state.get("total", 0))
+        total_pages = max(1, (total + VERIF_PAGE_SIZE - 1) // VERIF_PAGE_SIZE)
+        page = max(1, min(int(state.get("page", 1)), total_pages))
+        state["page"] = page
+
+        st.caption(f"当前检索：{state.get('mode')} · {state.get('term')}")
+
+        if total == 0:
+            st.info("📉 未寻得匹配的验方记载。")
+        else:
+            offset = (page - 1) * VERIF_PAGE_SIZE
             conn = get_connection()
             try:
-                if search_mode == "方式一：输入疾病名称检索":
+                if state.get("mode") == "方式一：输入疾病名称检索":
+                    like = f"%{state.get('term', '')}%"
                     df_result = pd.read_sql(
                         f'SELECT * FROM "{VERIF_TABLE}" '
-                        "WHERE 主治疾病 LIKE ? OR 方名 LIKE ? OR 症状 LIKE ? LIMIT 100",
+                        "WHERE 主治疾病 LIKE ? OR 方名 LIKE ? OR 症状 LIKE ? "
+                        "ORDER BY id LIMIT ? OFFSET ?",
                         conn,
-                        params=(f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"),
+                        params=(like, like, like, VERIF_PAGE_SIZE, offset),
                     )
                 else:
-                    matched_ids = load_verif_index().get(search_term, [])[:100]
-                    if not matched_ids:
-                        df_result = pd.DataFrame()
-                    else:
-                        placeholders = ",".join("?" * len(matched_ids))
+                    page_ids = (state.get("ids") or [])[offset:offset + VERIF_PAGE_SIZE]
+                    if page_ids:
+                        placeholders = ",".join("?" * len(page_ids))
                         df_result = pd.read_sql(
-                            f'SELECT * FROM "{VERIF_TABLE}" WHERE id IN ({placeholders}) LIMIT 100',
+                            f'SELECT * FROM "{VERIF_TABLE}" WHERE id IN ({placeholders}) ORDER BY id',
                             conn,
-                            params=tuple(matched_ids),
+                            params=tuple(page_ids),
                         )
+                    else:
+                        df_result = pd.DataFrame()
             finally:
                 conn.close()
 
-            if df_result.empty:
-                st.info("📉 未寻得匹配的验方记载。")
-            else:
-                st.success(f"✅ 检索完毕，共得 {len(df_result)} 则验方：")
-                for _, row in df_result.iterrows():
-                    render_verif_card(row)
+            st.success(
+                f"✅ 共检索到 {total} 则验方，当前第 {page}/{total_pages} 页（每页 {VERIF_PAGE_SIZE} 条）：")
+            for _, row in df_result.iterrows():
+                render_verif_card(row)
+
+            if total_pages > 1:
+                prev_col, info_col, next_col = st.columns([1, 2, 1])
+                with prev_col:
+                    if st.button("⬅️ 上一页", disabled=page <= 1, key="verif_prev_page"):
+                        state["page"] = page - 1
+                        st.session_state["verif_search_state"] = state
+                        st.rerun()
+                with info_col:
+                    st.markdown(
+                        f"<div style='text-align:center;padding-top:6px'>第 {page} / {total_pages} 页</div>",
+                        unsafe_allow_html=True)
+                with next_col:
+                    if st.button("下一页 ➡️", disabled=page >= total_pages, key="verif_next_page"):
+                        state["page"] = page + 1
+                        st.session_state["verif_search_state"] = state
+                        st.rerun()
 
 # ==========================================
 # 模块四：养生食谱检索
