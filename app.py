@@ -1,6 +1,9 @@
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sqlite3
 import zipfile
 
@@ -27,6 +30,7 @@ st.markdown("""
 
 DB_FILE = "tcm_database.db"
 ZIP_FILE = "tcm_database.zip"
+DB_SCHEMA_VERSION = 4  # 数据库结构变更时递增，使 Streamlit 资源缓存失效并重新执行迁移
 
 FORMULA_TABLE = "formulas"
 RECIPE_TABLE = "recipes"
@@ -178,6 +182,40 @@ def migrate_verif_table(conn):
     conn.execute(f'DROP TABLE "{temp_name}"')
 
 
+ADMIN_PASSWORD_SALT_KEY = "admin_password_salt"
+ADMIN_PASSWORD_HASH_KEY = "admin_password_hash"
+ADMIN_PASSWORD_ITERATIONS = 120000
+DEFAULT_ADMIN_PASSWORD = "123"
+
+
+def hash_admin_password(password, salt_hex):
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        str(password).encode("utf-8"),
+        bytes.fromhex(salt_hex),
+        ADMIN_PASSWORD_ITERATIONS,
+    ).hex()
+
+
+def ensure_admin_password(conn):
+    """确保密码配置表存在；首次使用时以默认密码 123 初始化。"""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS system_config (key TEXT PRIMARY KEY, value TEXT)")
+    rows = dict(conn.execute("SELECT key, value FROM system_config").fetchall())
+    salt = rows.get(ADMIN_PASSWORD_SALT_KEY)
+    pwd_hash = rows.get(ADMIN_PASSWORD_HASH_KEY)
+    if not salt or not pwd_hash:
+        salt = secrets.token_hex(16)
+        pwd_hash = hash_admin_password(DEFAULT_ADMIN_PASSWORD, salt)
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+            (ADMIN_PASSWORD_SALT_KEY, salt))
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+            (ADMIN_PASSWORD_HASH_KEY, pwd_hash))
+    return salt, pwd_hash
+
+
 def rebuild_imported_table(conn, table_name, columns):
     """Excel 导入后重建标准表结构，恢复 id 主键与自增，避免后续增删改失效。"""
     existing = get_table_columns(conn, table_name)
@@ -238,11 +276,14 @@ def ensure_schema(conn):
 
     migrate_recipes_table(conn)
     migrate_verif_table(conn)
+    ensure_admin_password(conn)
     conn.commit()
 
 
 @st.cache_resource
-def init_system():
+def init_system(schema_version=DB_SCHEMA_VERSION):
+    # schema_version 作为缓存键：数据库结构升级后即使热重载也会重新执行迁移
+    _ = schema_version
     if not os.path.exists(DB_FILE):
         if os.path.exists(ZIP_FILE):
             try:
@@ -263,7 +304,7 @@ def init_system():
     return True, "Success"
 
 
-status, msg = init_system()
+status, msg = init_system(DB_SCHEMA_VERSION)
 if not status:
     st.error(f"⚠️️ 系统初始化失败: {msg}")
     st.stop()
@@ -271,6 +312,42 @@ if not status:
 
 def get_connection():
     return sqlite3.connect(DB_FILE, check_same_thread=False)
+
+
+def verify_admin_password(password):
+    """校验后台密码；数据库结构异常时按验证失败处理。"""
+    try:
+        conn = get_connection()
+        try:
+            salt, pwd_hash = ensure_admin_password(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        return hmac.compare_digest(hash_admin_password(password, salt), pwd_hash)
+    except Exception:
+        return False
+
+
+def set_admin_password(new_password):
+    """更新后台密码，返回 (是否成功, 错误信息)。"""
+    try:
+        conn = get_connection()
+        try:
+            ensure_admin_password(conn)
+            salt = secrets.token_hex(16)
+            pwd_hash = hash_admin_password(new_password, salt)
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+                (ADMIN_PASSWORD_SALT_KEY, salt))
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+                (ADMIN_PASSWORD_HASH_KEY, pwd_hash))
+            conn.commit()
+        finally:
+            conn.close()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
 
 
 @st.cache_resource
@@ -783,6 +860,9 @@ elif page == "🧾 各种验方检索":
 
     conn = get_connection()
     try:
+        # 防止热重载时启动迁移未执行，进入页面时再确保表结构正确
+        migrate_verif_table(conn)
+        conn.commit()
         verif_count = pd.read_sql(f'SELECT COUNT(*) AS c FROM "{VERIF_TABLE}"', conn).iloc[0]["c"]
     finally:
         conn.close()
@@ -921,7 +1001,7 @@ elif page == "⚙️ 典藏后台管理系统":
     if not st.session_state.admin_auth:
         pwd = st.text_input("🔑 请输入系统超级管理员密码", type="password", key="admin_pwd")
         if st.button("进入中枢", key="admin_login"):
-            if pwd == "123":
+            if verify_admin_password(pwd):
                 st.session_state.admin_auth = True
                 st.rerun()
             else:
@@ -929,8 +1009,8 @@ elif page == "⚙️ 典藏后台管理系统":
     else:
         st.success("✅ 身份验证通过：田 夫 (为了系统流畅，请规范操作)")
 
-        tab_stat, tab_edit, tab_import, tab_danger = st.tabs([
-            "📊 数据统计", "✏️ 数据维护(增删)", "📁 批量导入", "⚠️ 高危操作"
+        tab_stat, tab_edit, tab_import, tab_password, tab_danger = st.tabs([
+            "📊 数据统计", "✏️ 数据维护(增删)", "📁 批量导入", "🔐 密码管理", "⚠️ 高危操作"
         ])
 
         with tab_stat:
@@ -1208,6 +1288,9 @@ elif page == "⚙️ 典藏后台管理系统":
                     try:
                         conn = get_connection()
                         if target_table == VERIF_TABLE:
+                            # 兼容旧库/热重载未迁移的情况，导入前强制校正表结构
+                            migrate_verif_table(conn)
+                            conn.commit()
                             df_list = [pd.read_excel(xls, sheet_name=s) for s in xls.sheet_names]
                             new_data = pd.concat(df_list, ignore_index=True)
                             new_data.columns = [str(c).strip() for c in new_data.columns]
@@ -1306,6 +1389,29 @@ elif page == "⚙️ 典藏后台管理系统":
                             st.success(f"🎉 导入成功！过滤重复后库中共存有 {len(combined_df)} 条数据。")
                     except Exception as e:
                         st.error(f"导入出错，可能是文件格式不匹配: {e}")
+
+        with tab_password:
+            st.subheader("🔐 后台登录密码")
+            st.caption("修改后立即生效，下次进入后台请使用新密码。密码以哈希形式保存，不保存明文。")
+            with st.form("change_admin_pwd_form"):
+                current_pwd = st.text_input("当前密码", type="password")
+                new_pwd = st.text_input("新密码（至少 4 位）", type="password")
+                confirm_pwd = st.text_input("确认新密码", type="password")
+                change_submitted = st.form_submit_button("💾 保存新密码", type="primary")
+            if change_submitted:
+                if not verify_admin_password(current_pwd):
+                    st.error("当前密码不正确。")
+                elif len(new_pwd) < 4:
+                    st.error("新密码至少 4 位。")
+                elif new_pwd != confirm_pwd:
+                    st.error("两次输入的新密码不一致。")
+                else:
+                    ok, error = set_admin_password(new_pwd)
+                    if ok:
+                        st.success("✅ 后台密码已修改，下次登录请使用新密码。")
+                    else:
+                        st.error(f"密码修改失败：{error}")
+            st.caption("如忘记密码，可在数据库中删除 system_config 表的 admin_password_salt、admin_password_hash 两行，系统会恢复默认密码 123。")
 
         with tab_danger:
             st.subheader("☢️ 高危指令区")
