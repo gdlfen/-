@@ -813,18 +813,16 @@ elif page == "🧾 各种验方检索":
 # ==========================================
 elif page == "🍲 四季养生食谱检索":
     st.title("🍲 养生食谱数据库")
-    st.markdown("多维度精准匹配，顺应四时养生。不填的条件默认不作限制。")
+    st.markdown("按食材用料、核心功效、适用季节、菜式品种四个维度检索。不填的条件默认不作限制。")
 
     with st.container(border=True):
         col1, col2 = st.columns(2)
         with col1:
             cailiao = st.text_input("🥦 食材用料 (如: 猪肉、山药)", key="recipe_cailiao")
             gongxiao = st.text_input("✨ 核心功效 (如: 健脾、润肺)", key="recipe_gongxiao")
-            nianji = st.text_input("👴 适用年龄 (如: 老年、儿童)", key="recipe_nianji")
         with col2:
-            zhuyi = st.text_input("⚠️ 注意事项 (如: 忌辛辣、脾胃虚寒少食)", key="recipe_zhuyi")
-            xingbie = st.text_input("👫 适用性别 (如: 男、女)", key="recipe_xingbie")
-            pinlei = st.text_input("🥘 菜式品类 (如: 汤羹、粥)", key="recipe_pinlei")
+            jijie = st.text_input("🌸 适用季节 (如: 春季、夏季)", key="recipe_jijie")
+            pinlei = st.text_input("🥘 菜式品种 (如: 汤羹、粥)", key="recipe_pinlei")
 
         if st.button("查询养生食谱", type="primary", key="recipe_search"):
             query = "SELECT * FROM recipes WHERE 1=1"
@@ -835,15 +833,9 @@ elif page == "🍲 四季养生食谱检索":
             if gongxiao:
                 query += " AND 功效 LIKE ?"
                 params.append(f'%{gongxiao}%')
-            if zhuyi:
-                query += " AND 注意事项 LIKE ?"
-                params.append(f'%{zhuyi}%')
-            if nianji:
-                query += " AND 适合年纪 LIKE ?"
-                params.append(f'%{nianji}%')
-            if xingbie:
-                query += " AND 适合性别 LIKE ?"
-                params.append(f'%{xingbie}%')
+            if jijie:
+                query += " AND 适合季节 LIKE ?"
+                params.append(f'%{jijie}%')
             if pinlei:
                 query += " AND 品类 LIKE ?"
                 params.append(f'%{pinlei}%')
@@ -855,7 +847,7 @@ elif page == "🍲 四季养生食谱检索":
             finally:
                 conn.close()
 
-            log_query("食谱检索", f"{cailiao}|{gongxiao}|{zhuyi}")
+            log_query("食谱检索", f"{cailiao}|{gongxiao}|{jijie}|{pinlei}")
 
             if df_result.empty:
                 st.info("📉 未寻得符合全部条件的食谱，请尝试精简检索词。")
@@ -863,14 +855,10 @@ elif page == "🍲 四季养生食谱检索":
                 st.success(f"✅ 寻得 {len(df_result)} 道养生佳肴：")
                 for _, row in df_result.iterrows():
                     with st.expander(f"🍲 【{safe_text(row.get('菜名'), '未知')}】 | 类: {safe_text(row.get('品类'))}"):
-                        st.markdown(f"**🥦 材料与制作:**\n {safe_text(row.get('材料和制作'))}")
-                        st.markdown(f"**✨ 功效:**\n {safe_text(row.get('功效'))}")
-                        st.markdown(f"**⚠️ 注意事项:**\n {safe_text(row.get('注意事项'))}")
-                        st.markdown("---")
-                        c1, c2, c3 = st.columns(3)
-                        c1.markdown(f"**👴 年纪:** {safe_text(row.get('适合年纪'), '老少皆宜')}")
-                        c2.markdown(f"**👫 性别:** {safe_text(row.get('适合性别'), '男女皆宜')}")
-                        c3.markdown(f"**🌸 季节:** {safe_text(row.get('适合季节'), '四季皆宜')}")
+                        # 逐列展示该结果的全部字段，不截断、不遗漏
+                        for column in df_result.columns:
+                            value = safe_text(row.get(column))
+                            st.markdown(f"**{column}:**\n {value if value else '（空）'}")
 
 # ==========================================
 # 模块五：后台管理系统
