@@ -32,7 +32,7 @@ FORMULA_TABLE = "formulas"
 RECIPE_TABLE = "recipes"
 VERIF_TABLE = "各种验方表"
 
-VERIF_COLUMNS = ["方名", "方剂", "主治功能", "案例", "来源", "备注"]
+VERIF_COLUMNS = ["方名", "方剂及用法", "主治疾病", "症状", "案例", "出处"]
 FORMULA_COLUMNS = [
     "id", "大医名", "方剂名", "方剂详情", "临床病名", "病例详情",
     "按语", "现代研究", "临证提要", "方别", "其他",
@@ -129,6 +129,55 @@ def migrate_recipes_table(conn):
     conn.execute("DROP TABLE recipes__legacy_migration")
 
 
+def migrate_verif_table(conn):
+    """把旧版各种验方表迁移为《各种验方数据表（式样）》的六列结构。"""
+    cols = get_table_columns(conn, VERIF_TABLE)
+    desired = ["id"] + VERIF_COLUMNS
+    if not cols or cols == desired:
+        return
+
+    def pick(*names):
+        for name in names:
+            if name in cols:
+                return f'"{name}"'
+        return "NULL"
+
+    case_expr = pick("案例")
+    if "备注" in cols:
+        base_expr = 'COALESCE("案例", \'\')' if "案例" in cols else "''"
+        case_expr = (
+            f"CASE WHEN \"备注\" IS NOT NULL AND TRIM(\"备注\") <> '' "
+            f"THEN {base_expr} || CASE WHEN {base_expr} = '' THEN '' ELSE char(10) END "
+            f"|| '【备注】' || \"备注\" ELSE {base_expr} END"
+        )
+
+    temp_name = f"{VERIF_TABLE}__legacy_migration"
+    conn.execute(f'DROP TABLE IF EXISTS "{temp_name}"')
+    conn.execute(f'ALTER TABLE "{VERIF_TABLE}" RENAME TO "{temp_name}"')
+    conn.execute(f'''CREATE TABLE "{VERIF_TABLE}"
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  方名 TEXT,
+                  方剂及用法 TEXT,
+                  主治疾病 TEXT,
+                  症状 TEXT,
+                  案例 TEXT,
+                  出处 TEXT)''')
+    select_expr = ", ".join([
+        pick("id"),
+        pick("方名"),
+        pick("方剂及用法", "方剂"),
+        pick("主治疾病", "主治功能"),
+        pick("症状"),
+        case_expr,
+        pick("出处", "来源"),
+    ])
+    conn.execute(f"""
+        INSERT INTO "{VERIF_TABLE}" ({", ".join(f'"{c}"' for c in desired)})
+        SELECT {select_expr} FROM "{temp_name}"
+    """)
+    conn.execute(f'DROP TABLE "{temp_name}"')
+
+
 def rebuild_imported_table(conn, table_name, columns):
     """Excel 导入后重建标准表结构，恢复 id 主键与自增，避免后续增删改失效。"""
     existing = get_table_columns(conn, table_name)
@@ -166,11 +215,11 @@ def ensure_schema(conn):
     c.execute(f'''CREATE TABLE IF NOT EXISTS "{VERIF_TABLE}"
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   方名 TEXT,
-                  方剂 TEXT,
-                  主治功能 TEXT,
+                  方剂及用法 TEXT,
+                  主治疾病 TEXT,
+                  症状 TEXT,
                   案例 TEXT,
-                  来源 TEXT,
-                  备注 TEXT)''')
+                  出处 TEXT)''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS recipes
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -188,6 +237,7 @@ def ensure_schema(conn):
                   品类 TEXT)''')
 
     migrate_recipes_table(conn)
+    migrate_verif_table(conn)
     conn.commit()
 
 
@@ -350,17 +400,16 @@ def render_formula_card(row):
 
 def render_verif_card(row):
     with st.container(border=True):
-        st.markdown(f"### 🧾 【{safe_text(row.get('方名'), '未知')}】")
-        st.markdown(f"**📜 方剂:**<br>{safe_text(row.get('方剂'), '无')}", unsafe_allow_html=True)
-        st.markdown(f"**🩺 主治功能:**<br>{safe_text(row.get('主治功能'), '无')}", unsafe_allow_html=True)
+        st.markdown(f"### 🧾 【{safe_text(row.get('方名'), '未命名')}】")
+        st.markdown(f"**📜 方剂及用法:**<br>{safe_text(row.get('方剂及用法'), '无')}", unsafe_allow_html=True)
+        st.markdown(f"**🩺 主治疾病:**<br>{safe_text(row.get('主治疾病'), '无')}", unsafe_allow_html=True)
+        st.markdown(f"**🤒 症状:**<br>{safe_text(row.get('症状'), '无')}", unsafe_allow_html=True)
         st.markdown(f"**📖 案例:**<br>{safe_text(row.get('案例'), '无')}", unsafe_allow_html=True)
-        st.markdown(
-            f"**📚 来源:** {safe_text(row.get('来源'), '未注明')} &nbsp;&nbsp;|&nbsp;&nbsp; "
-            f"**🗒️ 备注:** {safe_text(row.get('备注'), '无')}")
+        st.markdown(f"**📚 出处:** {safe_text(row.get('出处'), '未注明')}")
 
 
 def split_verif_indications(raw):
-    """把“主治功能”拆成可选的病名/功能项，兼容多行、分号、顿号。"""
+    """把“主治疾病”拆成可选的病名项，兼容多行、分号、顿号。"""
     if raw is None:
         return []
     try:
@@ -407,14 +456,14 @@ def load_disease_index():
 
 @st.cache_data(show_spinner=False)
 def load_verif_options():
-    """各种验方表中去重后的主治功能/病名菜单。"""
+    """各种验方表中去重后的主治疾病菜单。"""
     conn = get_connection()
     try:
-        df = pd.read_sql(f'SELECT 主治功能 FROM "{VERIF_TABLE}"', conn)
+        df = pd.read_sql(f'SELECT 主治疾病 FROM "{VERIF_TABLE}"', conn)
     finally:
         conn.close()
     names = set()
-    for raw in df["主治功能"].tolist():
+    for raw in df["主治疾病"].tolist():
         for part in split_verif_indications(raw):
             name = normalize_disease_name(part)
             if name:
@@ -424,14 +473,14 @@ def load_verif_options():
 
 @st.cache_data(show_spinner=False)
 def load_verif_index():
-    """主治功能 -> 记录 ID 的映射，供各种验方的“方式二”检索。"""
+    """主治疾病 -> 记录 ID 的映射，供各种验方的“方式二”检索。"""
     conn = get_connection()
     try:
-        df = pd.read_sql(f'SELECT id, 主治功能 FROM "{VERIF_TABLE}"', conn)
+        df = pd.read_sql(f'SELECT id, 主治疾病 FROM "{VERIF_TABLE}"', conn)
     finally:
         conn.close()
     mapping = {}
-    for record_id, raw in zip(df["id"].tolist(), df["主治功能"].tolist()):
+    for record_id, raw in zip(df["id"].tolist(), df["主治疾病"].tolist()):
         for part in split_verif_indications(raw):
             name = normalize_disease_name(part)
             if name:
@@ -730,7 +779,7 @@ elif page == "🤖 传世名方 AI 检索":
 # ==========================================
 elif page == "🧾 各种验方检索":
     st.title("🧾 各种验方检索")
-    st.markdown("在 **【各种验方表】** 中检索。支持输入疾病名称，也支持从菜单中选择疾病名称（按主治功能整理）。")
+    st.markdown("在 **【各种验方表】** 中检索。表格字段：方名、方剂及用法、主治疾病、症状、案例、出处。支持输入疾病名称或症状，也支持从菜单中选择疾病名称（按主治疾病整理）。")
 
     conn = get_connection()
     try:
@@ -753,7 +802,7 @@ elif page == "🧾 各种验方检索":
 
     if search_mode == "方式一：输入疾病名称检索":
         search_term = st.text_input(
-            "💡 方式一：输入疾病名称检索（例如：感冒、咳嗽，也可输入方名）",
+            "💡 方式一：输入疾病名称检索（例如：感冒、咳嗽，也可输入方名或症状）",
             "",
             key="verif_text_term",
         )
@@ -783,9 +832,9 @@ elif page == "🧾 各种验方检索":
                 if search_mode == "方式一：输入疾病名称检索":
                     df_result = pd.read_sql(
                         f'SELECT * FROM "{VERIF_TABLE}" '
-                        "WHERE 主治功能 LIKE ? OR 方名 LIKE ? LIMIT 100",
+                        "WHERE 主治疾病 LIKE ? OR 方名 LIKE ? OR 症状 LIKE ? LIMIT 100",
                         conn,
-                        params=(f"%{search_term}%", f"%{search_term}%"),
+                        params=(f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"),
                     )
                 else:
                     matched_ids = load_verif_index().get(search_term, [])[:100]
@@ -970,18 +1019,18 @@ elif page == "⚙️ 典藏后台管理系统":
                     else:
                         st.info("正在录入：各种验方")
                         v_name = st.text_input("方名*")
-                        v_recipe = st.text_area("方剂")
-                        v_indication = st.text_area("主治功能")
+                        v_recipe = st.text_area("方剂及用法")
+                        v_disease = st.text_area("主治疾病")
+                        v_symptom = st.text_area("症状")
                         v_case = st.text_area("案例")
-                        v_source = st.text_input("来源")
-                        v_note = st.text_input("备注")
+                        v_source = st.text_input("出处")
                         if st.form_submit_button("保存至验方库"):
                             if v_name:
                                 conn = get_connection()
                                 conn.execute(
-                                    f'INSERT INTO "{VERIF_TABLE}" (方名, 方剂, 主治功能, 案例, 来源, 备注) '
+                                    f'INSERT INTO "{VERIF_TABLE}" (方名, 方剂及用法, 主治疾病, 症状, 案例, 出处) '
                                     "VALUES (?,?,?,?,?,?)",
-                                    (v_name, v_recipe, v_indication, v_case, v_source, v_note))
+                                    (v_name, v_recipe, v_disease, v_symptom, v_case, v_source))
                                 conn.commit()
                                 conn.close()
                                 clear_search_caches()
@@ -1015,8 +1064,8 @@ elif page == "⚙️ 典藏后台管理系统":
                             query = ("SELECT id, 菜名, 品类 FROM recipes "
                                      "WHERE 菜名 LIKE ? OR 功效 LIKE ? OR 注意事项 LIKE ? LIMIT 20")
                         else:
-                            query = (f'SELECT id, 方名, 主治功能 FROM "{VERIF_TABLE}" '
-                                     "WHERE 方名 LIKE ? OR 主治功能 LIKE ? LIMIT 20")
+                            query = (f'SELECT id, 方名, 主治疾病 FROM "{VERIF_TABLE}" '
+                                     "WHERE 方名 LIKE ? OR 主治疾病 LIKE ? OR 症状 LIKE ? LIMIT 20")
                         search_res = pd.read_sql(
                             query, conn,
                             params=tuple([f'%{search_kw}%'] * query.count("?")))
@@ -1085,18 +1134,19 @@ elif page == "⚙️ 典藏后台管理系统":
                                     else:
                                         st.info(f"正在修改 ID: {edit_id} 的验方")
                                         u_v_name = st.text_input("方名*", value=safe_text(row.get('方名')))
-                                        u_v_recipe = st.text_area("方剂", value=safe_text(row.get('方剂')))
-                                        u_v_indication = st.text_area("主治功能", value=safe_text(row.get('主治功能')))
+                                        u_v_recipe = st.text_area("方剂及用法", value=safe_text(row.get('方剂及用法')))
+                                        u_v_disease = st.text_area("主治疾病", value=safe_text(row.get('主治疾病')))
+                                        u_v_symptom = st.text_area("症状", value=safe_text(row.get('症状')))
                                         u_v_case = st.text_area("案例", value=safe_text(row.get('案例')))
-                                        u_v_source = st.text_input("来源", value=safe_text(row.get('来源')))
-                                        u_v_note = st.text_input("备注", value=safe_text(row.get('备注')))
+                                        u_v_source = st.text_input("出处", value=safe_text(row.get('出处')))
 
                                         if st.form_submit_button("💾 保存验方修改", type="primary"):
                                             if u_v_name:
                                                 conn = get_connection()
                                                 conn.execute(
-                                                    f'UPDATE "{VERIF_TABLE}" SET 方名=?, 方剂=?, 主治功能=?, 案例=?, 来源=?, 备注=? WHERE id=?',
-                                                    (u_v_name, u_v_recipe, u_v_indication, u_v_case, u_v_source, u_v_note, edit_id))
+                                                    f'UPDATE "{VERIF_TABLE}" SET 方名=?, 方剂及用法=?, 主治疾病=?, 症状=?, 案例=?, 出处=? WHERE id=?',
+                                                    (u_v_name, u_v_recipe, u_v_disease, u_v_symptom,
+                                                     u_v_case, u_v_source, edit_id))
                                                 conn.commit()
                                                 conn.close()
                                                 clear_search_caches()
@@ -1148,6 +1198,9 @@ elif page == "⚙️ 典藏后台管理系统":
             else:
                 target_table = VERIF_TABLE
 
+            if target_table == VERIF_TABLE:
+                st.caption("各种验方表模板列：方名、方剂及用法、主治疾病、症状、案例、出处。")
+
             if uploaded_file is not None:
                 xls = pd.ExcelFile(uploaded_file)
                 st.write(f"📂 检测到 {len(xls.sheet_names)} 个工作表")
@@ -1158,32 +1211,52 @@ elif page == "⚙️ 典藏后台管理系统":
                             df_list = [pd.read_excel(xls, sheet_name=s) for s in xls.sheet_names]
                             new_data = pd.concat(df_list, ignore_index=True)
                             new_data.columns = [str(c).strip() for c in new_data.columns]
+                            # 兼容旧版表头：方剂/主治功能/来源 -> 模板新列名
+                            for old_col, new_col in (
+                                ("方剂", "方剂及用法"),
+                                ("主治功能", "主治疾病"),
+                                ("来源", "出处"),
+                            ):
+                                if old_col in new_data.columns and new_col not in new_data.columns:
+                                    new_data.rename(columns={old_col: new_col}, inplace=True)
+                            # 模板没有“备注”列，旧数据中的备注并入案例，避免丢失
+                            if "备注" in new_data.columns:
+                                if "案例" not in new_data.columns:
+                                    new_data["案例"] = ""
+                                base_case = new_data["案例"].fillna("").astype(str)
+                                note_text = new_data["备注"].fillna("").astype(str).str.strip()
+                                note_mask = note_text != ""
+                                new_data.loc[note_mask, "案例"] = (
+                                    base_case[note_mask].where(
+                                        base_case[note_mask] == "", base_case[note_mask] + "\n")
+                                    + "【备注】" + note_text[note_mask])
+                                new_data = new_data.drop(columns=["备注"])
                             for col in VERIF_COLUMNS:
                                 if col not in new_data.columns:
                                     new_data[col] = ""
                             new_data = new_data[VERIF_COLUMNS].fillna("")
 
+                            verif_col_sql = ", ".join(f'"{c}"' for c in VERIF_COLUMNS)
                             old_df = pd.read_sql(
-                                f'SELECT 方名, 主治功能 FROM "{VERIF_TABLE}"', conn)
+                                f'SELECT {verif_col_sql} FROM "{VERIF_TABLE}"', conn)
                             existing = {
-                                (safe_text(r["方名"]), safe_text(r["主治功能"]))
+                                tuple(safe_text(r[c]) for c in VERIF_COLUMNS)
                                 for _, r in old_df.iterrows()
                             }
-                            inserted = 0
+                            rows_to_insert = []
                             for _, r in new_data.iterrows():
-                                name = safe_text(r["方名"])
-                                if not name:
+                                values = tuple(safe_text(r[c]) for c in VERIF_COLUMNS)
+                                if not any(values) or values in existing:
                                     continue
-                                key = (name, safe_text(r["主治功能"]))
-                                if key in existing:
-                                    continue
-                                conn.execute(
-                                    f'INSERT INTO "{VERIF_TABLE}" (方名, 方剂, 主治功能, 案例, 来源, 备注) '
+                                rows_to_insert.append(values)
+                                existing.add(values)
+                            if rows_to_insert:
+                                conn.executemany(
+                                    f'INSERT INTO "{VERIF_TABLE}" '
+                                    "(方名, 方剂及用法, 主治疾病, 症状, 案例, 出处) "
                                     "VALUES (?,?,?,?,?,?)",
-                                    (name, safe_text(r["方剂"]), safe_text(r["主治功能"]),
-                                     safe_text(r["案例"]), safe_text(r["来源"]), safe_text(r["备注"])))
-                                existing.add(key)
-                                inserted += 1
+                                    rows_to_insert)
+                            inserted = len(rows_to_insert)
                             conn.commit()
                             total = conn.execute(
                                 f'SELECT COUNT(*) FROM "{VERIF_TABLE}"').fetchone()[0]
