@@ -2848,7 +2848,7 @@ elif page == "⚙️ 典藏后台管理系统":
                                     f"文件不完整：{actual_size}/{size} 字节")
                             title = os.path.splitext(name)[0].strip() or "未命名图书"
                             page_count = 0
-                            if fmt == "pdf" and size <= 100 * 1024 * 1024:
+                            if fmt == "pdf":
                                 page_count = get_pdf_page_count_from_path(part_path)
                             conn = get_connection()
                             try:
