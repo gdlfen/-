@@ -1939,7 +1939,7 @@ elif page == "📚 图书阅读":
             st.caption(
                 f"{reader_category} · {safe_text(fmt).upper()} · "
                 f"{format_file_size(file_size)} · {int(char_count or 0)} 字")
-            st.caption("页面区域支持左右滑动/滚轮翻页；上下滚动到页边后继续推动也可翻页。")
+            st.caption("页面区域支持左右滑动/滚轮翻页、双指开合缩放；右上角可全屏。")
             st.iframe(READER_GESTURE_JS_V2, height=38)
             text = text or ""
 
