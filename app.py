@@ -16,7 +16,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 # --- 全局与主题配置 (必须放在最顶部) ---
-st.set_page_config(page_title="典藏传世名方系统V2.0", page_icon="📜", layout="wide")
+st.set_page_config(page_title="中医典藏系统V2.0  田夫开发", page_icon="📜", layout="wide")
 
 # 注入自定义 CSS：庄重、古朴的中医古籍风格
 st.markdown("""
@@ -32,6 +32,8 @@ st.markdown("""
     .book-reader p { color: #0B0806 !important; font-weight: 500; text-indent: 2em; margin: 0 0 0.9em; }
     @keyframes pageFade { from { transform: translateX(8px); } to { transform: none; } }
     .page-fade { animation: pageFade 0.18s ease-out; }
+    #tcm-reader-content:fullscreen { width:100vw; height:100vh; max-width:none; max-height:none; border:0; border-radius:0; padding:4vh 6vw; background:#FFFFFF; overflow:auto; }
+    #tcm-reader-content:fullscreen img { max-height:none; }
     @media (max-width: 700px) { .book-reader { padding: 22px 20px; max-height: 70vh; } }
     .disclaimer { color: #B83B00; font-size: 0.85rem; padding: 10px; border-top: 1px dashed #D9C5A0; margin-top: 30px; }
     </style>
@@ -1057,7 +1059,7 @@ READER_GESTURE_JS = r"""
     }
     function turn(direction) {
       var now = Date.now();
-      if (now - lastTurn < 450) return;
+      if (now - lastTurn < 900) return;
       var label = direction === "next" ? "下一页" : "上一页";
       var buttons = doc.querySelectorAll("button");
       for (var i = 0; i < buttons.length; i++) {
@@ -1075,6 +1077,10 @@ READER_GESTURE_JS = r"""
       if (!active || !e.touches || !e.touches.length) return;
       sx = e.touches[0].clientX;
       sy = e.touches[0].clientY;
+      startAtTop = atTop(active);
+      startAtBottom = atBottom(active);
+      startAtLeft = atLeft(active);
+      startAtRight = atRight(active);
     }
     function onTouchMove(e) {
       if (!active || !e.touches || !e.touches.length) return;
@@ -1091,14 +1097,16 @@ READER_GESTURE_JS = r"""
       }
       var dx = e.changedTouches[0].clientX - sx;
       var dy = e.changedTouches[0].clientY - sy;
-      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+      var horizontal = Math.abs(dx) > 140 && Math.abs(dx) > Math.abs(dy) * 1.5;
+      if (horizontal && ((dx < 0 && startAtRight) || (dx > 0 && startAtLeft))) {
         turn(dx < 0 ? "next" : "prev");
-      } else if (dy < -90 && atBottom(active)) {
+      } else if (dy < -140 && startAtBottom) {
         turn("next");
-      } else if (dy > 90 && atTop(active)) {
+      } else if (dy > 140 && startAtTop) {
         turn("prev");
       }
       active = null;
+      startAtTop = startAtBottom = startAtLeft = startAtRight = false;
     }
     function onWheel(e) {
       var el = readerOf(e.target);
@@ -1132,6 +1140,301 @@ READER_GESTURE_JS = r"""
   } catch (e) {}
 })();
 </script>
+"""
+
+
+READER_GESTURE_JS_V2 = r"""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  html, body { margin:0; padding:0; height:38px; overflow:hidden; background:transparent;
+    font-family:'Noto Sans SC','Microsoft YaHei',sans-serif; }
+  #fsBtn { float:right; margin:3px 0; padding:5px 12px; border:1px solid #792D11;
+    border-radius:6px; background:#FFFFFF; color:#792D11; font-size:13px; cursor:pointer; }
+  #fsBtn:hover { background:#792D11; color:#FFFFFF; }
+</style>
+</head>
+<body>
+<button id="fsBtn" type="button">⛶ 全屏阅读</button>
+<script>
+(function () {
+  try {
+    var P = window.parent;
+    if (!P || P === window) return;
+    if (P.__tcmGestureCleanup) {
+      try { P.__tcmGestureCleanup(); } catch (e) {}
+    }
+    var doc = P.document;
+    var lastTurn = 0;
+    var active = null;
+    var sx = 0, sy = 0;
+    var startAtTop = false, startAtBottom = false;
+    var startAtLeft = false, startAtRight = false;
+    var accX = 0, accY = 0, lastWheelTime = 0;
+    var pinchStart = 0, pinchTarget = null, pinchBase = 0, pinching = false;
+
+    function readerOf(target) {
+      if (!target || typeof target.closest !== "function") return null;
+      return target.closest("#tcm-reader-content");
+    }
+    function atTop(el) { return el.scrollTop <= 4; }
+    function atBottom(el) {
+      return el.scrollHeight - el.scrollTop - el.clientHeight <= 8;
+    }
+    function atLeft(el) { return el.scrollLeft <= 4; }
+    function atRight(el) {
+      return el.scrollWidth - el.scrollLeft - el.clientWidth <= 8;
+    }
+    function currentZoom(el) {
+      if (el.classList.contains("book-reader")) {
+        return parseFloat(P.getComputedStyle(el).fontSize) || 18;
+      }
+      var img = el.querySelector("img");
+      return img ? (parseFloat(img.style.width) || 150) : 150;
+    }
+    function applyZoom(el, value) {
+      if (el.classList.contains("book-reader")) {
+        var fs = Math.max(12, Math.min(48, value));
+        el.style.fontSize = fs + "px";
+      } else {
+        var img = el.querySelector("img");
+        if (img) {
+          var width = Math.max(60, Math.min(500, value));
+          img.style.width = width + "%";
+        }
+      }
+    }
+    function turn(direction) {
+      var now = Date.now();
+      if (now - lastTurn < 900) return;
+      var label = direction === "next" ? "下一页" : "上一页";
+      var buttons = doc.querySelectorAll("button");
+      for (var i = 0; i < buttons.length; i++) {
+        var b = buttons[i];
+        var text = (b.innerText || b.textContent || "");
+        if (text.indexOf(label) >= 0 && !b.disabled) {
+          b.click();
+          lastTurn = now;
+          return;
+        }
+      }
+    }
+    function onTouchStart(e) {
+      if (e.touches && e.touches.length === 2) {
+        var el = readerOf(e.target);
+        if (!el) return;
+        pinchTarget = el;
+        pinching = true;
+        active = null;
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        pinchStart = Math.sqrt(dx * dx + dy * dy);
+        pinchBase = currentZoom(el);
+        return;
+      }
+      active = readerOf(e.target);
+      if (!active || !e.touches || !e.touches.length) return;
+      sx = e.touches[0].clientX;
+      sy = e.touches[0].clientY;
+      startAtTop = atTop(active);
+      startAtBottom = atBottom(active);
+      startAtLeft = atLeft(active);
+      startAtRight = atRight(active);
+    }
+    function onTouchMove(e) {
+      if (pinching && e.touches && e.touches.length === 2) {
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        var distance = Math.sqrt(dx * dx + dy * dy);
+        if (pinchStart > 0 && pinchTarget) {
+          applyZoom(pinchTarget, pinchBase * distance / pinchStart);
+          e.preventDefault();
+        }
+        return;
+      }
+      if (!active || !e.touches || !e.touches.length) return;
+      var mx = e.touches[0].clientX - sx;
+      var my = e.touches[0].clientY - sy;
+      if (Math.abs(mx) > Math.abs(my) && Math.abs(mx) > 20) {
+        e.preventDefault();
+      }
+    }
+    function onTouchEnd(e) {
+      if (pinching) {
+        if (!e.touches || e.touches.length < 2) {
+          pinching = false;
+          pinchTarget = null;
+        }
+        return;
+      }
+      if (!active || !e.changedTouches || !e.changedTouches.length) {
+        active = null;
+        return;
+      }
+      var dx = e.changedTouches[0].clientX - sx;
+      var dy = e.changedTouches[0].clientY - sy;
+      var horizontal = Math.abs(dx) > 140 && Math.abs(dx) > Math.abs(dy) * 1.5;
+      if (horizontal && ((dx < 0 && startAtRight) || (dx > 0 && startAtLeft))) {
+        turn(dx < 0 ? "next" : "prev");
+      } else if (dy < -140 && startAtBottom) {
+        turn("next");
+      } else if (dy > 140 && startAtTop) {
+        turn("prev");
+      }
+      active = null;
+      startAtTop = startAtBottom = startAtLeft = startAtRight = false;
+    }
+    function onWheel(e) {
+      var el = readerOf(e.target);
+      if (!el) return;
+      if (e.ctrlKey) {
+        e.preventDefault();
+        applyZoom(el, currentZoom(el) * (e.deltaY < 0 ? 1.08 : 0.92));
+        return;
+      }
+      var now = Date.now();
+      if (now - lastWheelTime > 350) {
+        accX = 0;
+        accY = 0;
+      }
+      lastWheelTime = now;
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 3) {
+        var horizontalEdge = (e.deltaX > 0 && atRight(el)) ||
+          (e.deltaX < 0 && atLeft(el));
+        if (horizontalEdge) {
+          if ((accX > 0 && e.deltaX < 0) || (accX < 0 && e.deltaX > 0)) {
+            accX = 0;
+          }
+          accX += e.deltaX;
+          e.preventDefault();
+          if (Math.abs(accX) > 180) {
+            turn(e.deltaX > 0 ? "next" : "prev");
+            accX = 0;
+          }
+        } else {
+          accX = 0;
+        }
+        return;
+      }
+      accX = 0;
+      if (e.deltaY > 0 && atBottom(el)) {
+        accY += e.deltaY;
+        e.preventDefault();
+        if (accY > 160) {
+          turn("next");
+          accY = 0;
+        }
+      } else if (e.deltaY < 0 && atTop(el)) {
+        accY += e.deltaY;
+        e.preventDefault();
+        if (accY < -160) {
+          turn("prev");
+          accY = 0;
+        }
+      } else {
+        accY = 0;
+      }
+    }
+    function exitOverlay(el) {
+      if (!el) return;
+      try {
+        el.setAttribute("style", el.getAttribute("data-tcm-orig-style") || "");
+        el.removeAttribute("data-tcm-orig-style");
+        el.removeAttribute("data-tcm-overlay");
+        var img = el.querySelector("img");
+        if (img && img.hasAttribute("data-tcm-orig-style")) {
+          img.setAttribute("style", img.getAttribute("data-tcm-orig-style") || "");
+          img.removeAttribute("data-tcm-orig-style");
+        }
+        var close = doc.getElementById("tcm-fs-close");
+        if (close) close.remove();
+        var btn = document.getElementById("fsBtn");
+        if (btn) btn.textContent = "⛶ 全屏阅读";
+      } catch (e) {}
+    }
+    function toggleOverlay() {
+      try {
+        var el = doc.querySelector("#tcm-reader-content");
+        if (!el) return;
+        if (el.getAttribute("data-tcm-overlay") === "1") {
+          exitOverlay(el);
+          return;
+        }
+        el.setAttribute("data-tcm-orig-style", el.getAttribute("style") || "");
+        el.setAttribute("data-tcm-overlay", "1");
+        el.style.position = "fixed";
+        el.style.top = "0";
+        el.style.left = "0";
+        el.style.right = "0";
+        el.style.bottom = "0";
+        el.style.width = "100vw";
+        el.style.height = "100vh";
+        el.style.maxWidth = "none";
+        el.style.maxHeight = "none";
+        el.style.margin = "0";
+        el.style.boxShadow = "none";
+        el.style.zIndex = "2147483647";
+        el.style.borderRadius = "0";
+        el.style.border = "0";
+        el.style.padding = "4vh 6vw";
+        el.style.background = "#FFFFFF";
+        el.style.overflow = "auto";
+        var img = el.querySelector("img");
+        if (img) {
+          img.setAttribute("data-tcm-orig-style", img.getAttribute("style") || "");
+          img.style.width = "100%";
+        }
+        var close = doc.createElement("button");
+        close.id = "tcm-fs-close";
+        close.type = "button";
+        close.textContent = "退出全屏";
+        close.style.cssText = "position:fixed;top:14px;right:18px;z-index:2147483647;" +
+          "padding:8px 14px;border:1px solid #792D11;border-radius:6px;" +
+          "background:#792D11;color:#FFFFFF;font-size:14px;cursor:pointer;";
+        close.addEventListener("click", function () { exitOverlay(el); });
+        doc.body.appendChild(close);
+        var btn = document.getElementById("fsBtn");
+        if (btn) btn.textContent = "退出全屏";
+      } catch (e) {}
+    }
+    function onKeyDown(e) {
+      if (e.key === "Escape") {
+        var el = doc.querySelector("#tcm-reader-content");
+        if (el && el.getAttribute("data-tcm-overlay") === "1") {
+          exitOverlay(el);
+        }
+      }
+    }
+    var fsBtn = document.getElementById("fsBtn");
+    if (fsBtn) {
+      fsBtn.addEventListener("click", toggleOverlay);
+    }
+    doc.addEventListener("touchstart", onTouchStart, { passive: true });
+    doc.addEventListener("touchmove", onTouchMove, { passive: false });
+    doc.addEventListener("touchend", onTouchEnd, { passive: false });
+    doc.addEventListener("wheel", onWheel, { passive: false });
+    doc.addEventListener("keydown", onKeyDown);
+    P.__tcmGestureCleanup = function () {
+      try {
+        doc.removeEventListener("touchstart", onTouchStart);
+        doc.removeEventListener("touchmove", onTouchMove);
+        doc.removeEventListener("touchend", onTouchEnd);
+        doc.removeEventListener("wheel", onWheel);
+        doc.removeEventListener("keydown", onKeyDown);
+        var el = doc.querySelector("#tcm-reader-content");
+        if (el && el.getAttribute("data-tcm-overlay") === "1") {
+          exitOverlay(el);
+        }
+      } catch (e) {}
+      P.__tcmGestureCleanup = null;
+    };
+  } catch (e) {}
+})();
+</script>
+</body>
+</html>
 """
 
 
@@ -1251,7 +1554,10 @@ bootstrap_book_library()
 
 # --- 2. 侧边栏与路由 ---
 st.sidebar.markdown("<h1 style='text-align: center; font-size: 60px;'>☯️</h1>", unsafe_allow_html=True)
-st.sidebar.title("📜 中医典藏系统V2.0")
+st.sidebar.markdown(
+    "<h1 style='font-size:1.55rem; line-height:1.35;'>📜 中医典藏系统V2.0</h1>"
+    "<div style='font-size:12px; font-weight:400; color:#6B5A4A; margin-top:-8px;'>田夫开发</div>",
+    unsafe_allow_html=True)
 page = st.sidebar.radio("模块导航", [
     "🔍 传世名方基础检索",
     "🤖 传世名方 AI 检索",
@@ -1621,7 +1927,7 @@ elif page == "📚 图书阅读":
                 f"{reader_category} · {safe_text(fmt).upper()} · "
                 f"{format_file_size(file_size)} · {int(char_count or 0)} 字")
             st.caption("页面区域支持左右滑动/滚轮翻页；上下滚动到页边后继续推动也可翻页。")
-            st.iframe(READER_GESTURE_JS, height=1)
+            st.iframe(READER_GESTURE_JS_V2, height=38)
             text = text or ""
 
             if text.strip():
