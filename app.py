@@ -30,6 +30,8 @@ st.markdown("""
     mark.yellow-highlight { background-color: #FFF2CC; color: #B83B00; font-weight: bold; padding: 0 4px; border-radius: 2px; border-bottom: 2px solid #F0B27A; }
     .book-reader { max-width: 920px; margin: 18px auto 30px; background: #FFFDF8; border: 1px solid #E8DCC4; border-radius: 12px; padding: 38px 48px; box-shadow: 0 8px 24px rgba(90,60,30,0.08); font-family: 'Noto Serif SC', 'SimSun', 'Songti SC', serif; line-height: 2.05; color: #2C2825; text-align: justify; }
     .book-reader p { text-indent: 2em; margin: 0 0 0.9em; }
+    @keyframes pageFade { from { opacity: 0.25; transform: translateX(8px); } to { opacity: 1; transform: none; } }
+    .page-fade { animation: pageFade 0.18s ease-out; }
     @media (max-width: 700px) { .book-reader { padding: 22px 20px; } }
     .disclaimer { color: #B83B00; font-size: 0.85rem; padding: 10px; border-top: 1px dashed #D9C5A0; margin-top: 30px; }
     </style>
@@ -41,6 +43,9 @@ DB_SCHEMA_VERSION = 5  # 数据库结构变更时递增，使 Streamlit 资源�
 VERIF_PAGE_SIZE = 20  # 各种验方检索每页条数
 FORMULA_PAGE_SIZE = 20  # 传世名方基础检索每页条数
 BOOK_PAGE_CHARS = 1200  # 图书文本阅读每页字符数
+BOOK_BACKUP_FILE = os.environ.get(
+    "TCM_BOOK_BACKUP_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(DB_FILE)), "book_library_backup.db"))
 
 BOOK_CATEGORIES = [
     "基础理论类",
@@ -742,27 +747,62 @@ def get_pdf_page_count(data):
         return 0
 
 
-def render_pdf_page(data, page_index, zoom=1.5):
-    """把扫描版 PDF 的指定页渲染成图片，避免把大 PDF 塞进浏览器。"""
-    try:
+def get_pdf_document(book_id, data):
+    """缓存 PDF 文档对象，翻页/缩放时不再反复解析几十 MB 的文件。"""
+    key = f"pdf_doc_{book_id}"
+    doc = st.session_state.get(key)
+    if doc is None:
         import pypdfium2 as pdfium
-        pdf = pdfium.PdfDocument(data)
-        try:
-            if page_index < 0 or page_index >= len(pdf):
-                return None
-            page = pdf[page_index]
-            try:
-                bitmap = page.render(scale=float(zoom))
-                try:
-                    return bitmap.to_pil()
-                finally:
-                    bitmap.close()
-            finally:
-                page.close()
-        finally:
-            pdf.close()
+        doc = pdfium.PdfDocument(data)
+        st.session_state[key] = doc
+    return doc
+
+
+def render_pdf_page_cached(book_id, data, page_index):
+    """按页缓存 JPEG，缩放只改 CSS 宽度，不重新渲染 PDF。"""
+    cache_key = f"pdf_page_cache_{book_id}"
+    cache = st.session_state.get(cache_key)
+    if cache is None:
+        cache = {}
+        st.session_state[cache_key] = cache
+    if page_index in cache:
+        return cache[page_index]
+
+    page = None
+    bitmap = None
+    image = None
+    try:
+        doc = get_pdf_document(book_id, data)
+        if page_index < 0 or page_index >= len(doc):
+            return None
+        page = doc[page_index]
+        bitmap = page.render(scale=1.7)
+        image = bitmap.to_pil()
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=82, optimize=True)
+        result = buffer.getvalue()
+        if len(cache) >= 24:
+            cache.clear()
+        cache[page_index] = result
+        return result
     except Exception:
         return None
+    finally:
+        if image is not None:
+            try:
+                image.close()
+            except Exception:
+                pass
+        if bitmap is not None:
+            try:
+                bitmap.close()
+            except Exception:
+                pass
+        if page is not None:
+            try:
+                page.close()
+            except Exception:
+                pass
 
 
 def get_reading_position(book_id):
@@ -789,6 +829,141 @@ def save_reading_position(book_id, position):
             conn.commit()
         finally:
             conn.close()
+        save_backup_progress(book_id, position)
+    except Exception:
+        pass
+
+
+BOOK_BACKUP_SCHEMA = """
+CREATE TABLE IF NOT EXISTS books (
+  id INTEGER PRIMARY KEY, category TEXT NOT NULL, title TEXT NOT NULL,
+  format TEXT, filename TEXT, text_content TEXT, char_count INTEGER DEFAULT 0,
+  page_count INTEGER DEFAULT 0, file_size INTEGER DEFAULT 0,
+  uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(category, title));
+CREATE TABLE IF NOT EXISTS book_files (book_id INTEGER PRIMARY KEY, content BLOB);
+CREATE TABLE IF NOT EXISTS reading_progress (
+  book_id INTEGER PRIMARY KEY, position INTEGER DEFAULT 0,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+"""
+
+
+def backup_book_library():
+    """把图书库单独备份，避免部署包更新主数据库时丢失图书。"""
+    try:
+        if not os.path.exists(DB_FILE):
+            return
+        backup_dir = os.path.dirname(os.path.abspath(BOOK_BACKUP_FILE))
+        if backup_dir:
+            os.makedirs(backup_dir, exist_ok=True)
+        src = sqlite3.connect(DB_FILE)
+        dst = sqlite3.connect(BOOK_BACKUP_FILE)
+        try:
+            dst.executescript(BOOK_BACKUP_SCHEMA)
+            dst.execute("DELETE FROM reading_progress")
+            dst.execute("DELETE FROM book_files")
+            dst.execute("DELETE FROM books")
+            for row in src.execute(
+                    "SELECT id, category, title, format, filename, text_content, "
+                    "char_count, page_count, file_size, uploaded_at FROM books"):
+                dst.execute(
+                    "INSERT INTO books VALUES (?,?,?,?,?,?,?,?,?,?)", row)
+            for row in src.execute("SELECT book_id, content FROM book_files"):
+                dst.execute("INSERT INTO book_files VALUES (?,?)", row)
+            for row in src.execute(
+                    "SELECT book_id, position, updated_at FROM reading_progress"):
+                dst.execute("INSERT INTO reading_progress VALUES (?,?,?)", row)
+            dst.commit()
+        finally:
+            dst.close()
+            src.close()
+    except Exception:
+        pass
+
+
+def save_backup_progress(book_id, position):
+    if not os.path.exists(BOOK_BACKUP_FILE):
+        return
+    try:
+        conn = sqlite3.connect(BOOK_BACKUP_FILE)
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS reading_progress "
+                         "(book_id INTEGER PRIMARY KEY, position INTEGER DEFAULT 0, "
+                         "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)")
+            conn.execute(
+                "INSERT OR REPLACE INTO reading_progress "
+                "(book_id, position, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                (int(book_id), max(0, int(position))))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def restore_book_library_from_backup(force=False):
+    if not os.path.exists(BOOK_BACKUP_FILE) or not os.path.exists(DB_FILE):
+        return False
+    try:
+        src = sqlite3.connect(BOOK_BACKUP_FILE)
+        try:
+            backup_count = src.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+        finally:
+            src.close()
+        if not backup_count:
+            return False
+        main = get_connection()
+        try:
+            if main.execute("SELECT COUNT(*) FROM books").fetchone()[0] and not force:
+                return False
+            src = sqlite3.connect(BOOK_BACKUP_FILE)
+            try:
+                main.execute("DELETE FROM reading_progress")
+                main.execute("DELETE FROM book_files")
+                main.execute("DELETE FROM books")
+                for row in src.execute(
+                        "SELECT id, category, title, format, filename, text_content, "
+                        "char_count, page_count, file_size, uploaded_at FROM books"):
+                    main.execute("INSERT INTO books VALUES (?,?,?,?,?,?,?,?,?,?)", row)
+                for row in src.execute("SELECT book_id, content FROM book_files"):
+                    main.execute("INSERT INTO book_files VALUES (?,?)", row)
+                for row in src.execute(
+                        "SELECT book_id, position, updated_at FROM reading_progress"):
+                    main.execute("INSERT INTO reading_progress VALUES (?,?,?)", row)
+                main.commit()
+                return True
+            finally:
+                src.close()
+        finally:
+            main.close()
+    except Exception:
+        return False
+
+
+def bootstrap_book_library():
+    """主库为空时从备份恢复；主库有图书而备份为空时先备份。"""
+    try:
+        if not os.path.exists(DB_FILE):
+            return
+        main_count = 0
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            main_count = conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+        finally:
+            conn.close()
+        backup_count = 0
+        if os.path.exists(BOOK_BACKUP_FILE):
+            try:
+                b = sqlite3.connect(BOOK_BACKUP_FILE)
+                try:
+                    backup_count = b.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+                finally:
+                    b.close()
+            except Exception:
+                backup_count = 0
+        if main_count and not backup_count:
+            backup_book_library()
+        elif not main_count and backup_count:
+            restore_book_library_from_backup()
     except Exception:
         pass
 
@@ -818,23 +993,27 @@ def book_page_html(text, font_size):
             continue
         parts.append(f"<p>{block.replace(chr(10), '<br>')}</p>")
     return (
-        f"<div class='book-reader' style='font-size:{int(font_size)}px'>"
+        f"<div class='book-reader page-fade' style='font-size:{int(font_size)}px'>"
         + "".join(parts)
         + "</div>"
     )
 
 
-def render_book_nav(book_id, page_index, pages, suffix):
+def render_book_nav(book_id, page_index, pages, suffix, force_key=None):
     prev_col, next_col, info_col = st.columns([1, 1, 3])
     with prev_col:
         if st.button("⬅️ 上一页", disabled=page_index <= 0,
                      key=f"book_prev_{suffix}_{book_id}"):
             save_reading_position(book_id, pages[page_index - 1][0])
+            if force_key:
+                st.session_state[force_key] = True
             st.rerun()
     with next_col:
         if st.button("下一页 ➡️", disabled=page_index >= len(pages) - 1,
                      key=f"book_next_{suffix}_{book_id}"):
             save_reading_position(book_id, pages[page_index + 1][0])
+            if force_key:
+                st.session_state[force_key] = True
             st.rerun()
     with info_col:
         st.markdown(
@@ -941,9 +1120,18 @@ def clear_search_caches():
     st.session_state.pop("verif_search_state", None)
     st.session_state.pop("formula_search_state", None)
     for key in list(st.session_state.keys()):
-        if key.startswith("reader_pages_") or key.startswith("pdf_bytes_"):
+        if key.startswith("pdf_doc_"):
+            doc = st.session_state.pop(key, None)
+            try:
+                if doc is not None:
+                    doc.close()
+            except Exception:
+                pass
+        elif key.startswith(("reader_pages_", "pdf_bytes_", "pdf_page_cache_")):
             st.session_state.pop(key, None)
 
+
+bootstrap_book_library()
 
 # --- 2. 侧边栏与路由 ---
 st.sidebar.markdown("<h1 style='text-align: center; font-size: 60px;'>☯️</h1>", unsafe_allow_html=True)
@@ -1336,12 +1524,26 @@ elif page == "📚 图书阅读":
                     if position != starts[page_index]:
                         save_reading_position(book_id, starts[page_index])
 
-                    st.caption("阅读位置会自动保存；可用下方按钮翻页。")
-                    render_book_nav(book_id, page_index, pages, "top")
+                    page_slider_key = f"text_page_slider_{book_id}"
+                    force_key = f"text_force_page_{book_id}"
+                    force_page = st.session_state.pop(force_key, False)
+                    if force_page or page_slider_key not in st.session_state:
+                        st.session_state[page_slider_key] = page_index + 1
+                    selected_page = st.slider(
+                        "滑动翻页", 1, len(pages), key=page_slider_key)
+                    if selected_page != page_index + 1:
+                        save_reading_position(book_id, pages[selected_page - 1][0])
+                        st.session_state[force_key] = True
+                        st.rerun()
+
+                    st.caption("阅读位置会自动保存；可拖动滑块或点击按钮翻页。")
+                    render_book_nav(
+                        book_id, page_index, pages, "top", force_key)
                     st.markdown(
                         book_page_html(pages[page_index][1], font_size),
                         unsafe_allow_html=True)
-                    render_book_nav(book_id, page_index, pages, "bottom")
+                    render_book_nav(
+                        book_id, page_index, pages, "bottom", force_key)
             elif safe_text(fmt) == "pdf":
                 bytes_key = f"pdf_bytes_{book_id}"
                 if bytes_key not in st.session_state:
@@ -1358,17 +1560,27 @@ elif page == "📚 图书阅读":
                             "页码位置会自动记忆，可调节缩放。")
                         pdf_zoom = st.slider(
                             "PDF 缩放", 1.0, 3.0, 1.5, 0.1, key=f"pdf_zoom_{book_id}")
-                        image = render_pdf_page(content, page - 1, pdf_zoom)
-                        if image is not None:
-                            buffer = io.BytesIO()
-                            image.save(buffer, format="PNG")
-                            image_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+                        page_slider_key = f"pdf_page_slider_{book_id}"
+                        force_key = f"pdf_force_page_{book_id}"
+                        force_page = st.session_state.pop(force_key, False)
+                        if force_page or page_slider_key not in st.session_state:
+                            st.session_state[page_slider_key] = page
+                        selected_page = st.slider(
+                            "滑动翻页", 1, total_pages, key=page_slider_key)
+                        if selected_page != page:
+                            save_reading_position(book_id, selected_page - 1)
+                            st.session_state[force_key] = True
+                            st.rerun()
+
+                        image_data = render_pdf_page_cached(book_id, content, page - 1)
+                        if image_data:
+                            image_b64 = base64.b64encode(image_data).decode("ascii")
                             zoom_percent = int(round(pdf_zoom * 100))
                             st.markdown(
-                                '<div style="overflow:auto;max-height:82vh;'
+                                '<div class="page-fade" style="overflow:auto;max-height:82vh;'
                                 'border:1px solid #E8DCC4;border-radius:8px;'
                                 'background:#FFFFFF;padding:8px;">'
-                                f'<img src="data:image/png;base64,{image_b64}" '
+                                f'<img src="data:image/jpeg;base64,{image_b64}" '
                                 f'style="width:{zoom_percent}%;max-width:none;display:block;'
                                 'margin:0 auto;" />'
                                 '</div>',
@@ -1382,6 +1594,7 @@ elif page == "📚 图书阅读":
                             if st.button("⬅️ 上一页", disabled=page <= 1,
                                          key=f"pdf_prev_{book_id}"):
                                 save_reading_position(book_id, page - 2)
+                                st.session_state[force_key] = True
                                 st.rerun()
                         with info_col:
                             st.markdown(
@@ -1392,6 +1605,7 @@ elif page == "📚 图书阅读":
                             if st.button("下一页 ➡️", disabled=page >= total_pages,
                                          key=f"pdf_next_{book_id}"):
                                 save_reading_position(book_id, page)
+                                st.session_state[force_key] = True
                                 st.rerun()
                     download_name = safe_text(book_row.get("filename")) or f"{title}.pdf"
                     render_protected_download(
@@ -2050,6 +2264,7 @@ elif page == "⚙️ 典藏后台管理系统":
                     finally:
                         conn.close()
                     clear_search_caches()
+                    backup_book_library()
                     st.success(f"✅ 图书导入完成，共处理 {success_count} 个文件。")
                     for message in warnings:
                         st.warning(message)
@@ -2088,6 +2303,7 @@ elif page == "⚙️ 典藏后台管理系统":
                     finally:
                         conn.close()
                     clear_search_caches()
+                    backup_book_library()
                     if deleted:
                         st.success("图书已删除。")
                         st.rerun()
@@ -2095,6 +2311,83 @@ elif page == "⚙️ 典藏后台管理系统":
                         st.warning("未找到该 ID 的图书。")
 
             st.caption("旧版 DOC/WPS 二进制文件若无法提取文字，会保存原文件，可在阅读页下载。")
+            st.markdown("### 📦 图书库备份与恢复")
+            st.caption(
+                "图书库会自动备份为 book_library_backup.db；主数据库被部署包覆盖后，"
+                "启动时会自动从该备份恢复。若整个运行目录被清空，请先下载备份文件保存。")
+            if st.button("📦 生成图书库备份文件", key="book_backup_generate"):
+                backup_book_library()
+                backup_count = 0
+                if os.path.exists(BOOK_BACKUP_FILE):
+                    try:
+                        check_conn = sqlite3.connect(BOOK_BACKUP_FILE)
+                        try:
+                            backup_count = check_conn.execute(
+                                "SELECT COUNT(*) FROM books").fetchone()[0]
+                        finally:
+                            check_conn.close()
+                    except Exception:
+                        backup_count = 0
+                if backup_count:
+                    with open(BOOK_BACKUP_FILE, "rb") as f:
+                        st.session_state["book_backup_export"] = f.read()
+                    st.success("✅ 备份已生成，可点击下方按钮下载。")
+                else:
+                    st.warning("当前没有可备份的图书。")
+            export_data = st.session_state.get("book_backup_export")
+            if export_data:
+                st.download_button(
+                    "⬇️ 下载图书库备份（.db）",
+                    data=export_data,
+                    file_name="book_library_backup.db",
+                    mime="application/octet-stream",
+                    key="book_backup_download")
+                if st.button("清除导出缓存", key="book_backup_export_clear"):
+                    st.session_state.pop("book_backup_export", None)
+                    st.rerun()
+
+            st.markdown("#### 📥 恢复图书库备份")
+            st.caption("上传之前下载的 .db 备份，会覆盖当前图书库，请确认后再操作。")
+            uploaded_backup = st.file_uploader(
+                "选择图书库备份文件（.db）", type=["db"], key="book_backup_upload")
+            if st.button("恢复此备份", key="book_backup_restore"):
+                if not uploaded_backup:
+                    st.warning("请先选择备份文件。")
+                else:
+                    raw = uploaded_backup.getvalue()
+                    if not raw.startswith(b"SQLite format 3\x00"):
+                        st.error("不是有效的 SQLite 备份文件。")
+                    else:
+                        temp_path = BOOK_BACKUP_FILE + ".upload"
+                        with open(temp_path, "wb") as f:
+                            f.write(raw)
+                        try:
+                            test_conn = sqlite3.connect(temp_path)
+                            try:
+                                count = test_conn.execute(
+                                    "SELECT COUNT(*) FROM books").fetchone()[0]
+                            finally:
+                                test_conn.close()
+                        except Exception:
+                            count = 0
+                        if not count:
+                            st.error("备份中没有图书数据或文件结构不正确。")
+                            try:
+                                os.remove(temp_path)
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                os.replace(temp_path, BOOK_BACKUP_FILE)
+                            except Exception as e:
+                                st.error(f"保存备份失败：{e}")
+                            else:
+                                if restore_book_library_from_backup(force=True):
+                                    clear_search_caches()
+                                    st.success("✅ 图书库已恢复。")
+                                    st.rerun()
+                                else:
+                                    st.error("恢复失败，请检查备份文件。")
 
         with tab_password:
             st.subheader("🔐 后台登录密码")
