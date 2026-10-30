@@ -641,6 +641,9 @@ def extract_book_content(data, filename):
     """提取图书文字，返回 (文本, PDF页数, 错误信息)。"""
     ext = os.path.splitext(filename)[1].lower().lstrip(".")
     if ext == "pdf":
+        # 超大 PDF 通常是扫描版，跳过全文提取，直接按页渲染，避免拖垮导入。
+        if len(data) > 20 * 1024 * 1024:
+            return "", get_pdf_page_count(data), ""
         try:
             try:
                 from pypdf import PdfReader
@@ -1120,6 +1123,8 @@ def clear_search_caches():
     st.session_state.pop("verif_search_state", None)
     st.session_state.pop("formula_search_state", None)
     for key in list(st.session_state.keys()):
+        if not isinstance(key, str):
+            continue
         if key.startswith("pdf_doc_"):
             doc = st.session_state.pop(key, None)
             try:
@@ -2237,37 +2242,47 @@ elif page == "⚙️ 典藏后台管理系统":
                 if not uploaded_books:
                     st.warning("请先选择图书文件。")
                 else:
-                    conn = get_connection()
                     success_count = 0
                     warnings = []
                     try:
-                        total = len(uploaded_books)
-                        progress = st.progress(0.0, text="正在导入图书...")
-                        for i, uploaded in enumerate(uploaded_books, start=1):
-                            filename = os.path.basename(uploaded.name)
-                            title = os.path.splitext(filename)[0].strip() or "未命名图书"
-                            fmt = os.path.splitext(filename)[1].lower().lstrip(".")
-                            data = uploaded.getvalue()
-                            try:
-                                text, page_count, error = extract_book_content(data, filename)
-                                upsert_book(
-                                    conn, book_category, title, fmt, filename,
-                                    data, text, page_count)
-                                conn.commit()
-                                success_count += 1
-                                if error:
-                                    warnings.append(f"{filename}：{error}")
-                            except Exception as e:
-                                warnings.append(f"{filename}：导入失败 {e}")
-                            progress.progress(i / total, text=f"已处理 {i}/{total}：{filename}")
-                        progress.progress(1.0, text="图书导入完成")
-                    finally:
-                        conn.close()
-                    clear_search_caches()
-                    backup_book_library()
-                    st.success(f"✅ 图书导入完成，共处理 {success_count} 个文件。")
-                    for message in warnings:
-                        st.warning(message)
+                        conn = get_connection()
+                        try:
+                            total = len(uploaded_books)
+                            progress = st.progress(0.0, text="正在导入图书...")
+                            for i, uploaded in enumerate(uploaded_books, start=1):
+                                filename = os.path.basename(uploaded.name)
+                                title = os.path.splitext(filename)[0].strip() or "未命名图书"
+                                fmt = os.path.splitext(filename)[1].lower().lstrip(".")
+                                try:
+                                    data = uploaded.getvalue()
+                                    text, page_count, error = extract_book_content(data, filename)
+                                    upsert_book(
+                                        conn, book_category, title, fmt, filename,
+                                        data, text, page_count)
+                                    conn.commit()
+                                    success_count += 1
+                                    if error:
+                                        warnings.append(f"{filename}：{error}")
+                                except Exception as e:
+                                    warnings.append(f"{filename}：导入失败 {e}")
+                                progress.progress(
+                                    i / total, text=f"已处理 {i}/{total}：{filename}")
+                            progress.progress(1.0, text="图书导入完成")
+                        finally:
+                            conn.close()
+                        try:
+                            clear_search_caches()
+                        except Exception:
+                            pass
+                        try:
+                            backup_book_library()
+                        except Exception:
+                            pass
+                        st.success(f"✅ 图书导入完成，共处理 {success_count} 个文件。")
+                        for message in warnings:
+                            st.warning(message)
+                    except Exception as e:
+                        st.error(f"图书导入失败：{e}")
 
             st.markdown("### 现有图书")
             conn = get_connection()
