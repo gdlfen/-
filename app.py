@@ -45,6 +45,7 @@ DB_SCHEMA_VERSION = 5  # 数据库结构变更时递增，使 Streamlit 资源�
 VERIF_PAGE_SIZE = 20  # 各种验方检索每页条数
 FORMULA_PAGE_SIZE = 20  # 传世名方基础检索每页条数
 BOOK_PAGE_CHARS = 1200  # 图书文本阅读每页字符数
+MAX_BOOK_UPLOAD_MB = 900  # 单个图书文件上限（.streamlit/config.toml 设置为 1024MB）
 BOOK_BACKUP_FILE = os.environ.get(
     "TCM_BOOK_BACKUP_FILE",
     os.path.join(os.path.dirname(os.path.abspath(DB_FILE)), "book_library_backup.db"))
@@ -644,6 +645,8 @@ def extract_book_content(data, filename):
     ext = os.path.splitext(filename)[1].lower().lstrip(".")
     if ext == "pdf":
         # 超大 PDF 通常是扫描版，跳过全文提取，直接按页渲染，避免拖垮导入。
+        if len(data) > 100 * 1024 * 1024:
+            return "", 0, ""
         if len(data) > 20 * 1024 * 1024:
             return "", get_pdf_page_count(data), ""
         try:
@@ -860,34 +863,44 @@ CREATE TABLE IF NOT EXISTS reading_progress (
 
 
 def backup_book_library():
-    """把图书库单独备份，避免部署包更新主数据库时丢失图书。"""
+    """用 SQL 直接复制图书表，避免把几百 MB BLOB 读入 Python 内存。"""
     try:
         if not os.path.exists(DB_FILE):
             return
         backup_dir = os.path.dirname(os.path.abspath(BOOK_BACKUP_FILE))
         if backup_dir:
             os.makedirs(backup_dir, exist_ok=True)
-        src = sqlite3.connect(DB_FILE)
-        dst = sqlite3.connect(BOOK_BACKUP_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
-            dst.executescript(BOOK_BACKUP_SCHEMA)
-            dst.execute("DELETE FROM reading_progress")
-            dst.execute("DELETE FROM book_files")
-            dst.execute("DELETE FROM books")
-            for row in src.execute(
-                    "SELECT id, category, title, format, filename, text_content, "
-                    "char_count, page_count, file_size, uploaded_at FROM books"):
-                dst.execute(
-                    "INSERT INTO books VALUES (?,?,?,?,?,?,?,?,?,?)", row)
-            for row in src.execute("SELECT book_id, content FROM book_files"):
-                dst.execute("INSERT INTO book_files VALUES (?,?)", row)
-            for row in src.execute(
-                    "SELECT book_id, position, updated_at FROM reading_progress"):
-                dst.execute("INSERT INTO reading_progress VALUES (?,?,?)", row)
-            dst.commit()
+            conn.execute("ATTACH DATABASE ? AS bk", (BOOK_BACKUP_FILE,))
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS bk.books (
+                  id INTEGER PRIMARY KEY, category TEXT NOT NULL, title TEXT NOT NULL,
+                  format TEXT, filename TEXT, text_content TEXT, char_count INTEGER DEFAULT 0,
+                  page_count INTEGER DEFAULT 0, file_size INTEGER DEFAULT 0,
+                  uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(category, title));
+                CREATE TABLE IF NOT EXISTS bk.book_files (
+                  book_id INTEGER PRIMARY KEY, content BLOB);
+                CREATE TABLE IF NOT EXISTS bk.reading_progress (
+                  book_id INTEGER PRIMARY KEY, position INTEGER DEFAULT 0,
+                  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+                DELETE FROM bk.reading_progress;
+                DELETE FROM bk.book_files;
+                DELETE FROM bk.books;
+                INSERT INTO bk.books
+                  (id, category, title, format, filename, text_content,
+                   char_count, page_count, file_size, uploaded_at)
+                  SELECT id, category, title, format, filename, text_content,
+                         char_count, page_count, file_size, uploaded_at FROM main.books;
+                INSERT INTO bk.book_files (book_id, content)
+                  SELECT book_id, content FROM main.book_files;
+                INSERT INTO bk.reading_progress (book_id, position, updated_at)
+                  SELECT book_id, position, updated_at FROM main.reading_progress;
+            """)
+            conn.commit()
+            conn.execute("DETACH DATABASE bk")
         finally:
-            dst.close()
-            src.close()
+            conn.close()
     except Exception:
         pass
 
@@ -915,40 +928,40 @@ def save_backup_progress(book_id, position):
 def restore_book_library_from_backup(force=False):
     if not os.path.exists(BOOK_BACKUP_FILE) or not os.path.exists(DB_FILE):
         return False
+    main = None
     try:
-        src = sqlite3.connect(BOOK_BACKUP_FILE)
-        try:
-            backup_count = src.execute("SELECT COUNT(*) FROM books").fetchone()[0]
-        finally:
-            src.close()
+        main = sqlite3.connect(DB_FILE)
+        main.execute("ATTACH DATABASE ? AS bk", (BOOK_BACKUP_FILE,))
+        backup_count = main.execute("SELECT COUNT(*) FROM bk.books").fetchone()[0]
         if not backup_count:
             return False
-        main = get_connection()
-        try:
-            if main.execute("SELECT COUNT(*) FROM books").fetchone()[0] and not force:
-                return False
-            src = sqlite3.connect(BOOK_BACKUP_FILE)
-            try:
-                main.execute("DELETE FROM reading_progress")
-                main.execute("DELETE FROM book_files")
-                main.execute("DELETE FROM books")
-                for row in src.execute(
-                        "SELECT id, category, title, format, filename, text_content, "
-                        "char_count, page_count, file_size, uploaded_at FROM books"):
-                    main.execute("INSERT INTO books VALUES (?,?,?,?,?,?,?,?,?,?)", row)
-                for row in src.execute("SELECT book_id, content FROM book_files"):
-                    main.execute("INSERT INTO book_files VALUES (?,?)", row)
-                for row in src.execute(
-                        "SELECT book_id, position, updated_at FROM reading_progress"):
-                    main.execute("INSERT INTO reading_progress VALUES (?,?,?)", row)
-                main.commit()
-                return True
-            finally:
-                src.close()
-        finally:
-            main.close()
+        if main.execute("SELECT COUNT(*) FROM main.books").fetchone()[0] and not force:
+            return False
+        main.executescript("""
+            DELETE FROM reading_progress;
+            DELETE FROM book_files;
+            DELETE FROM books;
+            INSERT INTO books
+              (id, category, title, format, filename, text_content,
+               char_count, page_count, file_size, uploaded_at)
+              SELECT id, category, title, format, filename, text_content,
+                     char_count, page_count, file_size, uploaded_at FROM bk.books;
+            INSERT INTO book_files (book_id, content)
+              SELECT book_id, content FROM bk.book_files;
+            INSERT INTO reading_progress (book_id, position, updated_at)
+              SELECT book_id, position, updated_at FROM bk.reading_progress;
+        """)
+        main.commit()
+        return True
     except Exception:
         return False
+    finally:
+        if main is not None:
+            try:
+                main.execute("DETACH DATABASE bk")
+            except Exception:
+                pass
+            main.close()
 
 
 def bootstrap_book_library():
@@ -2655,6 +2668,7 @@ elif page == "⚙️ 典藏后台管理系统":
             uploaded_books = st.file_uploader(
                 "选择图书文件（可多选）", type=BOOK_FILE_TYPES,
                 accept_multiple_files=True, key="book_import_files")
+            st.caption(f"单个文件上限约 {MAX_BOOK_UPLOAD_MB}MB；超过 200MB 的 PDF 会按扫描版处理。")
 
             if st.button("开始导入图书", type="primary", key="book_import_run"):
                 if not uploaded_books:
@@ -2672,6 +2686,9 @@ elif page == "⚙️ 典藏后台管理系统":
                                 title = os.path.splitext(filename)[0].strip() or "未命名图书"
                                 fmt = os.path.splitext(filename)[1].lower().lstrip(".")
                                 try:
+                                    if getattr(uploaded, "size", 0) > MAX_BOOK_UPLOAD_MB * 1024 * 1024:
+                                        raise ValueError(
+                                            f"文件超过 {MAX_BOOK_UPLOAD_MB}MB 上限")
                                     data = uploaded.getvalue()
                                     text, page_count, error = extract_book_content(data, filename)
                                     upsert_book(
