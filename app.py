@@ -1,4 +1,5 @@
 import bisect
+import base64
 import hashlib
 import hmac
 import html
@@ -394,6 +395,64 @@ def set_admin_password(new_password):
         return False, str(e)
 
 
+DOWNLOAD_PASSWORD_SALT_KEY = "download_password_salt"
+DOWNLOAD_PASSWORD_HASH_KEY = "download_password_hash"
+DEFAULT_DOWNLOAD_PASSWORD = "123"
+
+
+def ensure_download_password(conn):
+    """确保下载密码已初始化，默认 123，可在后台修改。"""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS system_config (key TEXT PRIMARY KEY, value TEXT)")
+    rows = dict(conn.execute("SELECT key, value FROM system_config").fetchall())
+    salt = rows.get(DOWNLOAD_PASSWORD_SALT_KEY)
+    pwd_hash = rows.get(DOWNLOAD_PASSWORD_HASH_KEY)
+    if not salt or not pwd_hash:
+        salt = secrets.token_hex(16)
+        pwd_hash = hash_admin_password(DEFAULT_DOWNLOAD_PASSWORD, salt)
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+            (DOWNLOAD_PASSWORD_SALT_KEY, salt))
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+            (DOWNLOAD_PASSWORD_HASH_KEY, pwd_hash))
+    return salt, pwd_hash
+
+
+def verify_download_password(password):
+    try:
+        conn = get_connection()
+        try:
+            salt, pwd_hash = ensure_download_password(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        return hmac.compare_digest(hash_admin_password(password, salt), pwd_hash)
+    except Exception:
+        return False
+
+
+def set_download_password(new_password):
+    try:
+        conn = get_connection()
+        try:
+            ensure_download_password(conn)
+            salt = secrets.token_hex(16)
+            pwd_hash = hash_admin_password(new_password, salt)
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+                (DOWNLOAD_PASSWORD_SALT_KEY, salt))
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+                (DOWNLOAD_PASSWORD_HASH_KEY, pwd_hash))
+            conn.commit()
+        finally:
+            conn.close()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 @st.cache_resource
 def _get_ai_storage_component():
     """浏览器 localStorage 存储组件；组件目录缺失时返回 None，页面仍可正常使用。"""
@@ -781,6 +840,31 @@ def render_book_nav(book_id, page_index, pages, suffix):
         st.markdown(
             f"<div style='text-align:right;padding-top:6px'>第 {page_index + 1} / {len(pages)} 页</div>",
             unsafe_allow_html=True)
+
+
+def render_protected_download(book_id, filename, content, mime):
+    """下载原文件前要求输入下载密码。"""
+    unlock_key = f"download_unlocked_{book_id}"
+    if st.session_state.get(unlock_key):
+        st.download_button(
+            "⬇️ 下载原文件",
+            data=content,
+            file_name=filename,
+            mime=mime,
+            key=f"book_download_{book_id}")
+        if st.button("🔒 锁定下载", key=f"download_lock_{book_id}"):
+            st.session_state[unlock_key] = False
+            st.rerun()
+    else:
+        with st.expander("🔒 下载原文件（需要密码）"):
+            pwd = st.text_input(
+                "下载密码", type="password", key=f"download_pwd_{book_id}")
+            if st.button("验证密码并解锁下载", key=f"download_unlock_{book_id}"):
+                if verify_download_password(pwd):
+                    st.session_state[unlock_key] = True
+                    st.rerun()
+                else:
+                    st.error("下载密码错误。")
 
 
 @st.cache_data(show_spinner=False)
@@ -1276,7 +1360,20 @@ elif page == "📚 图书阅读":
                             "PDF 缩放", 1.0, 3.0, 1.5, 0.1, key=f"pdf_zoom_{book_id}")
                         image = render_pdf_page(content, page - 1, pdf_zoom)
                         if image is not None:
-                            st.image(image, width="stretch")
+                            buffer = io.BytesIO()
+                            image.save(buffer, format="PNG")
+                            image_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+                            zoom_percent = int(round(pdf_zoom * 100))
+                            st.markdown(
+                                '<div style="overflow:auto;max-height:82vh;'
+                                'border:1px solid #E8DCC4;border-radius:8px;'
+                                'background:#FFFFFF;padding:8px;">'
+                                f'<img src="data:image/png;base64,{image_b64}" '
+                                f'style="width:{zoom_percent}%;max-width:none;display:block;'
+                                'margin:0 auto;" />'
+                                '</div>',
+                                unsafe_allow_html=True)
+                            st.caption(f"当前缩放：{zoom_percent}%")
                         else:
                             st.warning("PDF 页面渲染失败，可下载原文件阅读。")
 
@@ -1297,12 +1394,8 @@ elif page == "📚 图书阅读":
                                 save_reading_position(book_id, page)
                                 st.rerun()
                     download_name = safe_text(book_row.get("filename")) or f"{title}.pdf"
-                    st.download_button(
-                        "⬇️ 下载 PDF 原文件",
-                        data=content,
-                        file_name=download_name,
-                        mime="application/pdf",
-                        key=f"pdf_download_{book_id}")
+                    render_protected_download(
+                        book_id, download_name, content, "application/pdf")
                 else:
                     st.warning("未找到 PDF 原文件。")
             else:
@@ -1312,12 +1405,8 @@ elif page == "📚 图书阅读":
                 content = load_book_file(book_id)
                 if content:
                     download_name = safe_text(book_row.get("filename")) or f"{title}.{fmt}"
-                    st.download_button(
-                        "⬇️ 下载原文件",
-                        data=content,
-                        file_name=download_name,
-                        mime="application/octet-stream",
-                        key=f"book_download_{book_id}")
+                    render_protected_download(
+                        book_id, download_name, content, "application/octet-stream")
 
 # ==========================================
 # 模块四：各种验方检索
@@ -2029,6 +2118,29 @@ elif page == "⚙️ 典藏后台管理系统":
                     else:
                         st.error(f"密码修改失败：{error}")
             st.caption("如忘记密码，可在数据库中删除 system_config 表的 admin_password_salt、admin_password_hash 两行，系统会恢复默认密码 123。")
+
+            st.divider()
+            st.subheader("📥 下载原文件密码")
+            st.caption("阅读页下载图书原文件时需要此密码；默认 123，可在此修改。")
+            with st.form("change_download_pwd_form"):
+                current_dl_pwd = st.text_input("当前下载密码", type="password")
+                new_dl_pwd = st.text_input("新下载密码（至少 4 位）", type="password")
+                confirm_dl_pwd = st.text_input("确认新下载密码", type="password")
+                dl_change_submitted = st.form_submit_button("💾 保存下载密码", type="primary")
+            if dl_change_submitted:
+                if not verify_download_password(current_dl_pwd):
+                    st.error("当前下载密码不正确。")
+                elif len(new_dl_pwd) < 4:
+                    st.error("新下载密码至少 4 位。")
+                elif new_dl_pwd != confirm_dl_pwd:
+                    st.error("两次输入的新下载密码不一致。")
+                else:
+                    ok, error = set_download_password(new_dl_pwd)
+                    if ok:
+                        st.success("✅ 下载密码已修改。")
+                    else:
+                        st.error(f"下载密码修改失败：{error}")
+            st.caption("如忘记下载密码，可删除 system_config 表的 download_password_salt、download_password_hash 两行，恢复默认 123。")
 
         with tab_danger:
             st.subheader("☢️ 高危指令区")
