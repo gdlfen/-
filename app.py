@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import zipfile
 
@@ -51,6 +52,9 @@ BOOK_BACKUP_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(DB_FILE)), "book_library_backup.db"))
 BOOK_UPLOAD_DIR = os.path.join(
     os.path.dirname(os.path.abspath(DB_FILE)), "book_upload_chunks")
+STATIC_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(DB_FILE)), "static")
+BOOK_BACKUP_STATIC = os.path.join(STATIC_DIR, "book_library_backup.db")
 
 BOOK_CATEGORIES = [
     "基础理论类",
@@ -968,8 +972,23 @@ def backup_book_library():
             conn.execute("DETACH DATABASE bk")
         finally:
             conn.close()
+        sync_book_backup_static()
     except Exception:
         pass
+
+
+def sync_book_backup_static():
+    """把备份复制到 Streamlit 静态目录，供浏览器直接下载大文件。"""
+    try:
+        if not os.path.exists(BOOK_BACKUP_FILE):
+            return False
+        os.makedirs(STATIC_DIR, exist_ok=True)
+        temp_path = BOOK_BACKUP_STATIC + ".tmp"
+        shutil.copyfile(BOOK_BACKUP_FILE, temp_path)
+        os.replace(temp_path, BOOK_BACKUP_STATIC)
+        return True
+    except Exception:
+        return False
 
 
 def save_backup_progress(book_id, position):
@@ -2922,7 +2941,7 @@ elif page == "⚙️ 典藏后台管理系统":
             st.caption(
                 "图书库会自动备份为 book_library_backup.db；主数据库被部署包覆盖后，"
                 "启动时会自动从该备份恢复。若整个运行目录被清空，请先下载备份文件保存。")
-            if st.button("📦 生成图书库备份文件", key="book_backup_generate"):
+            if st.button("📦 生成 / 更新图书库备份", key="book_backup_generate"):
                 backup_book_library()
                 backup_count = 0
                 if os.path.exists(BOOK_BACKUP_FILE):
@@ -2936,22 +2955,20 @@ elif page == "⚙️ 典藏后台管理系统":
                     except Exception:
                         backup_count = 0
                 if backup_count:
-                    with open(BOOK_BACKUP_FILE, "rb") as f:
-                        st.session_state["book_backup_export"] = f.read()
                     st.success("✅ 备份已生成，可点击下方按钮下载。")
                 else:
                     st.warning("当前没有可备份的图书。")
-            export_data = st.session_state.get("book_backup_export")
-            if export_data:
-                st.download_button(
-                    "⬇️ 下载图书库备份（.db）",
-                    data=export_data,
-                    file_name="book_library_backup.db",
-                    mime="application/octet-stream",
-                    key="book_backup_download")
-                if st.button("清除导出缓存", key="book_backup_export_clear"):
-                    st.session_state.pop("book_backup_export", None)
-                    st.rerun()
+            if os.path.exists(BOOK_BACKUP_STATIC):
+                st.markdown(
+                    '<a href="/app/static/book_library_backup.db" download '
+                    'style="display:inline-block;padding:8px 14px;margin:4px 0;'
+                    'background:#792D11;color:#FFFFFF;border-radius:6px;'
+                    'text-decoration:none;font-weight:bold;">'
+                    '⬇️ 下载图书库备份（.db）</a>',
+                    unsafe_allow_html=True)
+                st.caption("备份文件较大，浏览器会直接下载，不经过应用上传通道。")
+            elif os.path.exists(BOOK_BACKUP_FILE):
+                st.info("请先点击上方“生成 / 更新图书库备份”，再下载。")
 
             st.markdown("#### 📥 恢复图书库备份")
             st.caption("上传之前下载的 .db 备份，会覆盖当前图书库，请确认后再操作。")
