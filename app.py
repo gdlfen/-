@@ -1,5 +1,4 @@
 import bisect
-import base64
 import hashlib
 import hmac
 import html
@@ -672,6 +671,41 @@ def load_book_file(book_id):
         conn.close()
 
 
+def get_pdf_page_count(data):
+    try:
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(data)
+        try:
+            return len(pdf)
+        finally:
+            pdf.close()
+    except Exception:
+        return 0
+
+
+def render_pdf_page(data, page_index, zoom=1.5):
+    """把扫描版 PDF 的指定页渲染成图片，避免把大 PDF 塞进浏览器。"""
+    try:
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(data)
+        try:
+            if page_index < 0 or page_index >= len(pdf):
+                return None
+            page = pdf[page_index]
+            try:
+                bitmap = page.render(scale=float(zoom))
+                try:
+                    return bitmap.to_pil()
+                finally:
+                    bitmap.close()
+            finally:
+                page.close()
+        finally:
+            pdf.close()
+    except Exception:
+        return None
+
+
 def get_reading_position(book_id):
     try:
         conn = get_connection()
@@ -823,7 +857,7 @@ def clear_search_caches():
     st.session_state.pop("verif_search_state", None)
     st.session_state.pop("formula_search_state", None)
     for key in list(st.session_state.keys()):
-        if key.startswith("reader_pages_"):
+        if key.startswith("reader_pages_") or key.startswith("pdf_bytes_"):
             st.session_state.pop(key, None)
 
 
@@ -1198,10 +1232,11 @@ elif page == "📚 图书阅读":
             st.caption(
                 f"{reader_category} · {safe_text(fmt).upper()} · "
                 f"{format_file_size(file_size)} · {int(char_count or 0)} 字")
-            font_size = st.slider("字体大小（文本阅读）", 14, 30, 18, 1, key="reader_font_size")
             text = text or ""
 
             if text.strip():
+                font_size = st.slider(
+                    "字体大小（文本阅读）", 14, 30, 18, 1, key="reader_font_size")
                 pages_key = f"reader_pages_{book_id}"
                 length_key = f"{pages_key}_length"
                 if st.session_state.get(length_key) != len(text):
@@ -1223,38 +1258,44 @@ elif page == "📚 图书阅读":
                         book_page_html(pages[page_index][1], font_size),
                         unsafe_allow_html=True)
                     render_book_nav(book_id, page_index, pages, "bottom")
-            elif safe_text(fmt) == "pdf" and int(page_count or 0) > 0:
-                content = load_book_file(book_id)
+            elif safe_text(fmt) == "pdf":
+                bytes_key = f"pdf_bytes_{book_id}"
+                if bytes_key not in st.session_state:
+                    st.session_state[bytes_key] = load_book_file(book_id)
+                content = st.session_state.get(bytes_key)
                 if content:
-                    page = max(1, min(get_reading_position(book_id) + 1, int(page_count)))
-                    st.info(
-                        "该 PDF 未提取到文字（可能是扫描版），以下按原版 PDF 阅读；"
-                        "页码位置会自动记忆，可用浏览器缩放调整大小。")
-                    if len(content) <= 4 * 1024 * 1024:
-                        b64 = base64.b64encode(content).decode("ascii")
-                        st.markdown(
-                            f'<iframe src="data:application/pdf;base64,{b64}#page={page}" '
-                            'width="100%" height="820" '
-                            'style="border:1px solid #E8DCC4;border-radius:8px;"></iframe>',
-                            unsafe_allow_html=True)
+                    total_pages = int(page_count or 0) or get_pdf_page_count(content)
+                    if total_pages <= 0:
+                        st.warning("无法读取 PDF 页数，可下载原文件阅读。")
                     else:
-                        st.pdf(content, height=820)
-                    prev_col, info_col, next_col = st.columns([1, 2, 1])
-                    with prev_col:
-                        if st.button("⬅️ 上一页", disabled=page <= 1,
-                                     key=f"pdf_prev_{book_id}"):
-                            save_reading_position(book_id, page - 2)
-                            st.rerun()
-                    with info_col:
-                        st.markdown(
-                            f"<div style='text-align:center;padding-top:6px'>"
-                            f"第 {page} / {int(page_count)} 页</div>",
-                            unsafe_allow_html=True)
-                    with next_col:
-                        if st.button("下一页 ➡️", disabled=page >= int(page_count),
-                                     key=f"pdf_next_{book_id}"):
-                            save_reading_position(book_id, page)
-                            st.rerun()
+                        page = max(1, min(get_reading_position(book_id) + 1, total_pages))
+                        st.info(
+                            "该 PDF 未提取到文字（可能是扫描版），按原版页面渲染阅读；"
+                            "页码位置会自动记忆，可调节缩放。")
+                        pdf_zoom = st.slider(
+                            "PDF 缩放", 1.0, 3.0, 1.5, 0.1, key=f"pdf_zoom_{book_id}")
+                        image = render_pdf_page(content, page - 1, pdf_zoom)
+                        if image is not None:
+                            st.image(image, width="stretch")
+                        else:
+                            st.warning("PDF 页面渲染失败，可下载原文件阅读。")
+
+                        prev_col, info_col, next_col = st.columns([1, 2, 1])
+                        with prev_col:
+                            if st.button("⬅️ 上一页", disabled=page <= 1,
+                                         key=f"pdf_prev_{book_id}"):
+                                save_reading_position(book_id, page - 2)
+                                st.rerun()
+                        with info_col:
+                            st.markdown(
+                                f"<div style='text-align:center;padding-top:6px'>"
+                                f"第 {page} / {total_pages} 页</div>",
+                                unsafe_allow_html=True)
+                        with next_col:
+                            if st.button("下一页 ➡️", disabled=page >= total_pages,
+                                         key=f"pdf_next_{book_id}"):
+                                save_reading_position(book_id, page)
+                                st.rerun()
                     download_name = safe_text(book_row.get("filename")) or f"{title}.pdf"
                     st.download_button(
                         "⬇️ 下载 PDF 原文件",

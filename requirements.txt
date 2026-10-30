@@ -4,3 +4,4 @@ openai
 openpyxl
 pypdf
 python-docx
+pypdfium2
