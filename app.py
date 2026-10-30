@@ -28,9 +28,9 @@ st.markdown("""
     .stButton>button:hover { background-color: #4A1A08; color: #FDFBF7; border: 1px solid #792D11; }
     [data-testid="stVerticalBlockBorderWrapper"] { background-color: #FFFFFF; border: 1px solid #E8DCC4 !important; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-radius: 8px; }
     mark.yellow-highlight { background-color: #FFF2CC; color: #B83B00; font-weight: bold; padding: 0 4px; border-radius: 2px; border-bottom: 2px solid #F0B27A; }
-    .book-reader { max-width: 920px; max-height: 74vh; overflow-y: auto; box-sizing: border-box; margin: 18px auto 18px; background: #FFFEFA; border: 1px solid #D8C7A8; border-radius: 12px; padding: 38px 48px; box-shadow: 0 8px 24px rgba(90,60,30,0.10); font-family: 'Noto Serif SC', 'SimSun', 'Songti SC', serif; line-height: 2.05; color: #17120F; text-align: justify; }
-    .book-reader p { color: #17120F !important; text-indent: 2em; margin: 0 0 0.9em; }
-    @keyframes pageFade { from { opacity: 0.6; transform: translateX(8px); } to { opacity: 1; transform: none; } }
+    .book-reader { max-width: 920px; max-height: 74vh; overflow-y: auto; box-sizing: border-box; margin: 18px auto 18px; background: #FFFFFF; border: 1px solid #D8C7A8; border-radius: 12px; padding: 38px 48px; box-shadow: 0 8px 24px rgba(90,60,30,0.12); font-family: 'Noto Serif SC', 'SimSun', 'Songti SC', serif; line-height: 2.05; color: #0B0806; text-align: justify; }
+    .book-reader p { color: #0B0806 !important; font-weight: 500; text-indent: 2em; margin: 0 0 0.9em; }
+    @keyframes pageFade { from { transform: translateX(8px); } to { transform: none; } }
     .page-fade { animation: pageFade 0.18s ease-out; }
     @media (max-width: 700px) { .book-reader { padding: 22px 20px; max-height: 70vh; } }
     .disclaimer { color: #B83B00; font-size: 0.85rem; padding: 10px; border-top: 1px dashed #D9C5A0; margin-top: 30px; }
@@ -779,17 +779,17 @@ def render_pdf_page_cached(book_id, data, page_index):
         if page_index < 0 or page_index >= len(doc):
             return None
         page = doc[page_index]
-        bitmap = page.render(scale=1.7)
+        bitmap = page.render(scale=2.4)
         image = bitmap.to_pil()
         try:
             from PIL import ImageEnhance
-            image = ImageEnhance.Contrast(image).enhance(1.22)
-            image = ImageEnhance.Brightness(image).enhance(1.03)
-            image = ImageEnhance.Sharpness(image).enhance(1.08)
+            image = ImageEnhance.Contrast(image).enhance(1.30)
+            image = ImageEnhance.Brightness(image).enhance(1.05)
+            image = ImageEnhance.Sharpness(image).enhance(1.15)
         except Exception:
             pass
         buffer = io.BytesIO()
-        image.save(buffer, format="JPEG", quality=88, optimize=True)
+        image.save(buffer, format="JPEG", quality=92, optimize=True)
         result = buffer.getvalue()
         if len(cache) >= 24:
             cache.clear()
@@ -1001,9 +1001,11 @@ def book_page_html(text, font_size):
         block = block.strip("\n")
         if not block.strip():
             continue
-        parts.append(f"<p>{block.replace(chr(10), '<br>')}</p>")
+        parts.append(
+            f"<p style='color:#0B0806;font-weight:500'>{block.replace(chr(10), '<br>')}</p>")
     return (
-        f"<div class='book-reader page-fade' style='font-size:{int(font_size)}px'>"
+        f"<div id='tcm-reader-content' class='book-reader page-fade' "
+        f"style='font-size:{int(font_size)}px;color:#0B0806'>"
         + "".join(parts)
         + "</div>"
     )
@@ -1029,6 +1031,108 @@ def render_book_nav(book_id, page_index, pages, suffix, force_key=None):
         st.markdown(
             f"<div style='text-align:right;padding-top:6px'>第 {page_index + 1} / {len(pages)} 页</div>",
             unsafe_allow_html=True)
+
+
+READER_GESTURE_JS = r"""
+<script>
+(function () {
+  try {
+    var P = window.parent;
+    if (!P || P === window) return;
+    if (P.__tcmGestureCleanup) {
+      try { P.__tcmGestureCleanup(); } catch (e) {}
+    }
+    var doc = P.document;
+    var lastTurn = 0;
+    var active = null;
+    var sx = 0, sy = 0;
+
+    function readerOf(target) {
+      if (!target || typeof target.closest !== "function") return null;
+      return target.closest("#tcm-reader-content");
+    }
+    function atTop(el) { return el.scrollTop <= 4; }
+    function atBottom(el) {
+      return el.scrollHeight - el.scrollTop - el.clientHeight <= 8;
+    }
+    function turn(direction) {
+      var now = Date.now();
+      if (now - lastTurn < 450) return;
+      var label = direction === "next" ? "下一页" : "上一页";
+      var buttons = doc.querySelectorAll("button");
+      for (var i = 0; i < buttons.length; i++) {
+        var b = buttons[i];
+        var text = (b.innerText || b.textContent || "");
+        if (text.indexOf(label) >= 0 && !b.disabled) {
+          b.click();
+          lastTurn = now;
+          return;
+        }
+      }
+    }
+    function onTouchStart(e) {
+      active = readerOf(e.target);
+      if (!active || !e.touches || !e.touches.length) return;
+      sx = e.touches[0].clientX;
+      sy = e.touches[0].clientY;
+    }
+    function onTouchMove(e) {
+      if (!active || !e.touches || !e.touches.length) return;
+      var dx = e.touches[0].clientX - sx;
+      var dy = e.touches[0].clientY - sy;
+      if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 20) {
+        e.preventDefault();
+      }
+    }
+    function onTouchEnd(e) {
+      if (!active || !e.changedTouches || !e.changedTouches.length) {
+        active = null;
+        return;
+      }
+      var dx = e.changedTouches[0].clientX - sx;
+      var dy = e.changedTouches[0].clientY - sy;
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+        turn(dx < 0 ? "next" : "prev");
+      } else if (dy < -90 && atBottom(active)) {
+        turn("next");
+      } else if (dy > 90 && atTop(active)) {
+        turn("prev");
+      }
+      active = null;
+    }
+    function onWheel(e) {
+      var el = readerOf(e.target);
+      if (!el) return;
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 30) {
+        e.preventDefault();
+        turn(e.deltaX > 0 ? "next" : "prev");
+        return;
+      }
+      if (atBottom(el) && e.deltaY > 30) {
+        e.preventDefault();
+        turn("next");
+      } else if (atTop(el) && e.deltaY < -30) {
+        e.preventDefault();
+        turn("prev");
+      }
+    }
+    doc.addEventListener("touchstart", onTouchStart, { passive: true });
+    doc.addEventListener("touchmove", onTouchMove, { passive: false });
+    doc.addEventListener("touchend", onTouchEnd, { passive: false });
+    doc.addEventListener("wheel", onWheel, { passive: false });
+    P.__tcmGestureCleanup = function () {
+      try {
+        doc.removeEventListener("touchstart", onTouchStart);
+        doc.removeEventListener("touchmove", onTouchMove);
+        doc.removeEventListener("touchend", onTouchEnd);
+        doc.removeEventListener("wheel", onWheel);
+      } catch (e) {}
+      P.__tcmGestureCleanup = null;
+    };
+  } catch (e) {}
+})();
+</script>
+"""
 
 
 def render_protected_download(book_id, filename, content, mime):
@@ -1516,6 +1620,8 @@ elif page == "📚 图书阅读":
             st.caption(
                 f"{reader_category} · {safe_text(fmt).upper()} · "
                 f"{format_file_size(file_size)} · {int(char_count or 0)} 字")
+            st.caption("页面区域支持左右滑动/滚轮翻页；上下滚动到页边后继续推动也可翻页。")
+            st.iframe(READER_GESTURE_JS, height=1)
             text = text or ""
 
             if text.strip():
@@ -1576,7 +1682,7 @@ elif page == "📚 图书阅读":
                             image_b64 = base64.b64encode(image_data).decode("ascii")
                             zoom_percent = int(round(pdf_zoom * 100))
                             st.markdown(
-                                '<div class="page-fade" style="overflow:auto;max-height:82vh;'
+                                '<div id="tcm-reader-content" class="page-fade" style="overflow:auto;max-height:82vh;'
                                 'border:1px solid #E8DCC4;border-radius:8px;'
                                 'background:#FFFFFF;padding:8px;">'
                                 f'<img src="data:image/jpeg;base64,{image_b64}" '
