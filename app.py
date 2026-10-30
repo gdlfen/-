@@ -783,9 +783,9 @@ def render_pdf_page_cached(book_id, data, page_index):
         image = bitmap.to_pil()
         try:
             from PIL import ImageEnhance
-            image = ImageEnhance.Contrast(image).enhance(1.30)
+            image = ImageEnhance.Contrast(image).enhance(1.40)
             image = ImageEnhance.Brightness(image).enhance(1.05)
-            image = ImageEnhance.Sharpness(image).enhance(1.15)
+            image = ImageEnhance.Sharpness(image).enhance(1.20)
         except Exception:
             pass
         buffer = io.BytesIO()
