@@ -28,11 +28,11 @@ st.markdown("""
     .stButton>button:hover { background-color: #4A1A08; color: #FDFBF7; border: 1px solid #792D11; }
     [data-testid="stVerticalBlockBorderWrapper"] { background-color: #FFFFFF; border: 1px solid #E8DCC4 !important; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-radius: 8px; }
     mark.yellow-highlight { background-color: #FFF2CC; color: #B83B00; font-weight: bold; padding: 0 4px; border-radius: 2px; border-bottom: 2px solid #F0B27A; }
-    .book-reader { max-width: 920px; margin: 18px auto 30px; background: #FFFDF8; border: 1px solid #E8DCC4; border-radius: 12px; padding: 38px 48px; box-shadow: 0 8px 24px rgba(90,60,30,0.08); font-family: 'Noto Serif SC', 'SimSun', 'Songti SC', serif; line-height: 2.05; color: #2C2825; text-align: justify; }
-    .book-reader p { text-indent: 2em; margin: 0 0 0.9em; }
-    @keyframes pageFade { from { opacity: 0.25; transform: translateX(8px); } to { opacity: 1; transform: none; } }
+    .book-reader { max-width: 920px; max-height: 74vh; overflow-y: auto; box-sizing: border-box; margin: 18px auto 18px; background: #FFFEFA; border: 1px solid #D8C7A8; border-radius: 12px; padding: 38px 48px; box-shadow: 0 8px 24px rgba(90,60,30,0.10); font-family: 'Noto Serif SC', 'SimSun', 'Songti SC', serif; line-height: 2.05; color: #17120F; text-align: justify; }
+    .book-reader p { color: #17120F !important; text-indent: 2em; margin: 0 0 0.9em; }
+    @keyframes pageFade { from { opacity: 0.6; transform: translateX(8px); } to { opacity: 1; transform: none; } }
     .page-fade { animation: pageFade 0.18s ease-out; }
-    @media (max-width: 700px) { .book-reader { padding: 22px 20px; } }
+    @media (max-width: 700px) { .book-reader { padding: 22px 20px; max-height: 70vh; } }
     .disclaimer { color: #B83B00; font-size: 0.85rem; padding: 10px; border-top: 1px dashed #D9C5A0; margin-top: 30px; }
     </style>
 """, unsafe_allow_html=True)
@@ -781,8 +781,15 @@ def render_pdf_page_cached(book_id, data, page_index):
         page = doc[page_index]
         bitmap = page.render(scale=1.7)
         image = bitmap.to_pil()
+        try:
+            from PIL import ImageEnhance
+            image = ImageEnhance.Contrast(image).enhance(1.22)
+            image = ImageEnhance.Brightness(image).enhance(1.03)
+            image = ImageEnhance.Sharpness(image).enhance(1.08)
+        except Exception:
+            pass
         buffer = io.BytesIO()
-        image.save(buffer, format="JPEG", quality=82, optimize=True)
+        image.save(buffer, format="JPEG", quality=88, optimize=True)
         result = buffer.getvalue()
         if len(cache) >= 24:
             cache.clear()
@@ -1529,24 +1536,22 @@ elif page == "📚 图书阅读":
                     if position != starts[page_index]:
                         save_reading_position(book_id, starts[page_index])
 
+                    st.caption("可上下滚动阅读；底部滑块左右拖动翻页。")
+                    st.markdown(
+                        book_page_html(pages[page_index][1], font_size),
+                        unsafe_allow_html=True)
+
                     page_slider_key = f"text_page_slider_{book_id}"
                     force_key = f"text_force_page_{book_id}"
                     force_page = st.session_state.pop(force_key, False)
                     if force_page or page_slider_key not in st.session_state:
                         st.session_state[page_slider_key] = page_index + 1
                     selected_page = st.slider(
-                        "滑动翻页", 1, len(pages), key=page_slider_key)
+                        "左右拖动翻页", 1, len(pages), key=page_slider_key)
                     if selected_page != page_index + 1:
                         save_reading_position(book_id, pages[selected_page - 1][0])
                         st.session_state[force_key] = True
                         st.rerun()
-
-                    st.caption("阅读位置会自动保存；可拖动滑块或点击按钮翻页。")
-                    render_book_nav(
-                        book_id, page_index, pages, "top", force_key)
-                    st.markdown(
-                        book_page_html(pages[page_index][1], font_size),
-                        unsafe_allow_html=True)
                     render_book_nav(
                         book_id, page_index, pages, "bottom", force_key)
             elif safe_text(fmt) == "pdf":
@@ -1562,20 +1567,9 @@ elif page == "📚 图书阅读":
                         page = max(1, min(get_reading_position(book_id) + 1, total_pages))
                         st.info(
                             "该 PDF 未提取到文字（可能是扫描版），按原版页面渲染阅读；"
-                            "页码位置会自动记忆，可调节缩放。")
+                            "页面可上下滚动，底部滑块左右拖动翻页，页码会自动记忆。")
                         pdf_zoom = st.slider(
                             "PDF 缩放", 1.0, 3.0, 1.5, 0.1, key=f"pdf_zoom_{book_id}")
-                        page_slider_key = f"pdf_page_slider_{book_id}"
-                        force_key = f"pdf_force_page_{book_id}"
-                        force_page = st.session_state.pop(force_key, False)
-                        if force_page or page_slider_key not in st.session_state:
-                            st.session_state[page_slider_key] = page
-                        selected_page = st.slider(
-                            "滑动翻页", 1, total_pages, key=page_slider_key)
-                        if selected_page != page:
-                            save_reading_position(book_id, selected_page - 1)
-                            st.session_state[force_key] = True
-                            st.rerun()
 
                         image_data = render_pdf_page_cached(book_id, content, page - 1)
                         if image_data:
@@ -1593,6 +1587,18 @@ elif page == "📚 图书阅读":
                             st.caption(f"当前缩放：{zoom_percent}%")
                         else:
                             st.warning("PDF 页面渲染失败，可下载原文件阅读。")
+
+                        page_slider_key = f"pdf_page_slider_{book_id}"
+                        force_key = f"pdf_force_page_{book_id}"
+                        force_page = st.session_state.pop(force_key, False)
+                        if force_page or page_slider_key not in st.session_state:
+                            st.session_state[page_slider_key] = page
+                        selected_page = st.slider(
+                            "左右拖动翻页", 1, total_pages, key=page_slider_key)
+                        if selected_page != page:
+                            save_reading_position(book_id, selected_page - 1)
+                            st.session_state[force_key] = True
+                            st.rerun()
 
                         prev_col, info_col, next_col = st.columns([1, 2, 1])
                         with prev_col:
