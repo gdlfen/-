@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Large Book Chunk Upload</title>
+  <style>
+    html, body { margin:0; padding:0; background:transparent; font-family:'Noto Sans SC','Microsoft YaHei',sans-serif; }
+    .wrap { border:1px dashed #B99B72; border-radius:8px; padding:10px 12px; background:#FFFDF8; }
+    input[type=file] { width:100%; font-size:13px; }
+    #status { margin-top:6px; color:#5A4A3A; font-size:12px; min-height:16px; }
+    #progress { margin-top:6px; height:5px; background:#E8DCC4; border-radius:4px; overflow:hidden; }
+    #bar { height:100%; width:0; background:#792D11; transition:width .2s ease; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <input id="file" type="file">
+  <div id="status">选择大于 200MB 的图书文件，将自动分片上传。</div>
+  <div id="progress"><div id="bar"></div></div>
+</div>
+<script>
+(function () {
+  "use strict";
+  var CHUNK_SIZE = 4 * 1024 * 1024;
+  var fileInput = document.getElementById("file");
+  var statusEl = document.getElementById("status");
+  var barEl = document.getElementById("bar");
+  var currentFile = null;
+  var uploadId = null;
+  var totalChunks = 0;
+  var nextIndex = 0;
+  var sending = false;
+  var ackIndex = -1;
+
+  function send(value) {
+    window.parent.postMessage({
+      isStreamlitMessage: true,
+      type: "streamlit:setComponentValue",
+      value: value,
+      dataType: "json"
+    }, "*");
+  }
+  function toBase64(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var binary = "";
+    var step = 0x8000;
+    for (var i = 0; i < bytes.length; i += step) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+    }
+    return btoa(binary);
+  }
+  function setProgress(index) {
+    var pct = totalChunks ? Math.min(100, Math.round((index + 1) * 100 / totalChunks)) : 0;
+    barEl.style.width = pct + "%";
+    statusEl.textContent = "正在分片上传：" + pct + "%";
+  }
+  function sendChunk(index) {
+    if (!currentFile || sending) return;
+    if (index >= totalChunks) {
+      statusEl.textContent = "分片发送完成，等待服务器合并导入…";
+      return;
+    }
+    sending = true;
+    var start = index * CHUNK_SIZE;
+    var end = Math.min(start + CHUNK_SIZE, currentFile.size);
+    var reader = new FileReader();
+    reader.onload = function () {
+      setProgress(index);
+      send({
+        upload_id: uploadId,
+        name: currentFile.name,
+        size: currentFile.size,
+        index: index,
+        total: totalChunks,
+        last: index === totalChunks - 1,
+        data: toBase64(reader.result)
+      });
+      nextIndex = index + 1;
+      sending = false;
+    };
+    reader.onerror = function () {
+      sending = false;
+      statusEl.textContent = "读取文件失败，请重新选择。";
+    };
+    reader.readAsArrayBuffer(currentFile.slice(start, end));
+  }
+  fileInput.addEventListener("change", function () {
+    currentFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+    if (!currentFile) return;
+    uploadId = String(Date.now()) + "-" + Math.random().toString(36).slice(2, 10);
+    totalChunks = Math.ceil(currentFile.size / CHUNK_SIZE);
+    nextIndex = 0;
+    ackIndex = -1;
+    barEl.style.width = "0";
+    statusEl.textContent = "准备上传 " + (currentFile.size / 1024 / 1024).toFixed(1) + "MB…";
+    sendChunk(0);
+  });
+  window.addEventListener("message", function (event) {
+    if (!event.data || event.data.type !== "streamlit:render") return;
+    var args = event.data.args || {};
+    if (args.accept) fileInput.accept = args.accept;
+    if (args.reset) {
+      currentFile = null;
+      uploadId = null;
+      totalChunks = 0;
+      nextIndex = 0;
+      sending = false;
+      ackIndex = -1;
+      fileInput.value = "";
+      barEl.style.width = "0";
+      statusEl.textContent = "选择大于 200MB 的图书文件，将自动分片上传。";
+      return;
+    }
+    if (typeof args.ack === "number") {
+      ackIndex = args.ack;
+    }
+    if (currentFile && !sending && nextIndex < totalChunks && nextIndex <= ackIndex + 1) {
+      sendChunk(nextIndex);
+    }
+  });
+  window.parent.postMessage({
+    isStreamlitMessage: true,
+    type: "streamlit:componentReady",
+    apiVersion: 1
+  }, "*");
+  window.parent.postMessage({
+    isStreamlitMessage: true,
+    type: "streamlit:setFrameHeight",
+    height: 110
+  }, "*");
+})();
+</script>
+</body>
+</html>

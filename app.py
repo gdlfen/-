@@ -49,6 +49,8 @@ MAX_BOOK_UPLOAD_MB = 900  # 单个图书文件上限（.streamlit/config.toml �
 BOOK_BACKUP_FILE = os.environ.get(
     "TCM_BOOK_BACKUP_FILE",
     os.path.join(os.path.dirname(os.path.abspath(DB_FILE)), "book_library_backup.db"))
+BOOK_UPLOAD_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(DB_FILE)), "book_upload_chunks")
 
 BOOK_CATEGORIES = [
     "基础理论类",
@@ -472,6 +474,21 @@ def _get_ai_storage_component():
         return None
 
 
+CHUNK_UPLOAD_COMPONENT_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "chunk_upload_component")
+
+
+@st.cache_resource
+def _get_chunk_upload_component():
+    if not os.path.isdir(CHUNK_UPLOAD_COMPONENT_DIR):
+        return None
+    try:
+        return components.declare_component(
+            "tcm_chunk_upload", path=CHUNK_UPLOAD_COMPONENT_DIR)
+    except Exception:
+        return None
+
+
 def _save_ai_settings_callback():
     """保存按钮回调：把当前输入交给浏览器存储组件写入 localStorage。"""
     config = {
@@ -707,6 +724,56 @@ def upsert_book(conn, category, title, fmt, filename, data, text, page_count):
     conn.execute(
         "INSERT OR REPLACE INTO book_files (book_id, content) VALUES (?, ?)",
         (book_id, sqlite3.Binary(data)))
+    return book_id, is_new
+
+
+def get_pdf_page_count_from_path(path):
+    try:
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(path)
+        try:
+            return len(pdf)
+        finally:
+            pdf.close()
+    except Exception:
+        return 0
+
+
+def upsert_book_from_path(conn, category, title, fmt, filename, path, page_count):
+    """分片上传完成后，用流式 BLOB 写入，避免把几百 MB 文件读入内存。"""
+    size = os.path.getsize(path)
+    existing = conn.execute(
+        "SELECT id FROM books WHERE category=? AND title=?", (category, title)).fetchone()
+    if existing:
+        book_id = int(existing[0])
+        conn.execute(
+            "UPDATE books SET format=?, filename=?, text_content='', char_count=0, "
+            "page_count=?, file_size=?, uploaded_at=CURRENT_TIMESTAMP WHERE id=?",
+            (fmt, filename, int(page_count or 0), size, book_id))
+        conn.execute("DELETE FROM book_files WHERE book_id=?", (book_id,))
+        is_new = False
+    else:
+        cur = conn.execute(
+            "INSERT INTO books (category, title, format, filename, text_content, "
+            "char_count, page_count, file_size) VALUES (?,?,?,?,?,?,?,?)",
+            (category, title, fmt, filename, "", 0, int(page_count or 0), size))
+        book_id = int(cur.lastrowid)
+        is_new = True
+    conn.execute(
+        "INSERT INTO book_files (book_id, content) VALUES (?, zeroblob(?))",
+        (book_id, size))
+    conn.commit()
+    blob = conn.blobopen("book_files", "content", book_id, readonly=False)
+    try:
+        with open(path, "rb") as source:
+            while True:
+                chunk = source.read(4 * 1024 * 1024)
+                if not chunk:
+                    break
+                blob.write(chunk)
+    finally:
+        blob.close()
+    conn.commit()
     return book_id, is_new
 
 
@@ -2718,6 +2785,96 @@ elif page == "⚙️ 典藏后台管理系统":
                             st.warning(message)
                     except Exception as e:
                         st.error(f"图书导入失败：{e}")
+
+            st.markdown("### 📦 超大文件分片上传（建议 >200MB）")
+            st.caption(
+                "浏览器按 4MB 分片发送，绕过单次 200MB 上传限制；"
+                f"单文件上限 {MAX_BOOK_UPLOAD_MB}MB。")
+            chunk_notice = st.session_state.pop("book_chunk_notice", None)
+            if chunk_notice:
+                st.success(chunk_notice)
+            chunk_category = st.selectbox(
+                "分片上传分类", BOOK_CATEGORIES, key="chunk_upload_category")
+            chunk_comp = _get_chunk_upload_component()
+            if chunk_comp is None:
+                st.warning("分片上传组件缺失，请检查 chunk_upload_component 目录。")
+            else:
+                reset_flag = st.session_state.pop("book_chunk_reset", False)
+                if reset_flag:
+                    st.session_state["book_chunk_done"] = False
+                    st.session_state["book_chunk_last"] = ""
+                    st.session_state["book_chunk_ack"] = -1
+                chunk_event = chunk_comp(
+                    ack=int(st.session_state.get("book_chunk_ack", -1)),
+                    reset=bool(reset_flag),
+                    accept=",".join("." + ext for ext in BOOK_FILE_TYPES),
+                    key="book_chunk_uploader")
+                if reset_flag:
+                    chunk_event = None
+                if (isinstance(chunk_event, dict) and chunk_event.get("data")
+                        and not st.session_state.get("book_chunk_done")):
+                    try:
+                        upload_id = re.sub(
+                            r"[^A-Za-z0-9_-]", "",
+                            str(chunk_event.get("upload_id", "")))[:80]
+                        index = int(chunk_event.get("index", -1))
+                        total = int(chunk_event.get("total", 0))
+                        size = int(chunk_event.get("size", 0))
+                        name = os.path.basename(str(chunk_event.get("name", "")))
+                        fmt = os.path.splitext(name)[1].lower().lstrip(".")
+                        if (not upload_id or index < 0 or total <= 0 or size <= 0
+                                or size > MAX_BOOK_UPLOAD_MB * 1024 * 1024):
+                            raise ValueError("分片参数无效或文件超过上限")
+                        if fmt not in BOOK_FILE_TYPES:
+                            raise ValueError("不支持的文件类型")
+                        os.makedirs(BOOK_UPLOAD_DIR, exist_ok=True)
+                        part_path = os.path.join(
+                            BOOK_UPLOAD_DIR, f"{upload_id}.part")
+                        event_key = f"{upload_id}:{index}"
+                        is_new = st.session_state.get("book_chunk_last") != event_key
+                        if is_new:
+                            if index == 0 and os.path.exists(part_path):
+                                os.remove(part_path)
+                            with open(part_path, "ab") as part:
+                                part.write(base64.b64decode(
+                                    str(chunk_event.get("data", ""))))
+                            st.session_state["book_chunk_last"] = event_key
+                        st.session_state["book_chunk_ack"] = index
+
+                        if is_new and index == total - 1:
+                            actual_size = os.path.getsize(part_path)
+                            if actual_size != size:
+                                raise ValueError(
+                                    f"文件不完整：{actual_size}/{size} 字节")
+                            title = os.path.splitext(name)[0].strip() or "未命名图书"
+                            page_count = 0
+                            if fmt == "pdf" and size <= 100 * 1024 * 1024:
+                                page_count = get_pdf_page_count_from_path(part_path)
+                            conn = get_connection()
+                            try:
+                                upsert_book_from_path(
+                                    conn, chunk_category, title, fmt, name,
+                                    part_path, page_count)
+                            finally:
+                                conn.close()
+                            try:
+                                os.remove(part_path)
+                            except Exception:
+                                pass
+                            clear_search_caches()
+                            backup_book_library()
+                            st.session_state["book_chunk_done"] = True
+                            st.session_state["book_chunk_reset"] = True
+                            st.session_state["book_chunk_ack"] = -1
+                            st.session_state["book_chunk_notice"] = (
+                                f"✅ 分片上传并导入完成：{name}")
+                            st.rerun()
+                        elif is_new:
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"分片上传失败：{e}")
+                        st.session_state["book_chunk_reset"] = True
+                        st.session_state["book_chunk_ack"] = -1
 
             st.markdown("### 现有图书")
             conn = get_connection()
