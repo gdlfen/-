@@ -1,5 +1,9 @@
+import bisect
+import base64
 import hashlib
 import hmac
+import html
+import io
 import json
 import os
 import re
@@ -24,15 +28,29 @@ st.markdown("""
     .stButton>button:hover { background-color: #4A1A08; color: #FDFBF7; border: 1px solid #792D11; }
     [data-testid="stVerticalBlockBorderWrapper"] { background-color: #FFFFFF; border: 1px solid #E8DCC4 !important; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-radius: 8px; }
     mark.yellow-highlight { background-color: #FFF2CC; color: #B83B00; font-weight: bold; padding: 0 4px; border-radius: 2px; border-bottom: 2px solid #F0B27A; }
+    .book-reader { max-width: 920px; margin: 18px auto 30px; background: #FFFDF8; border: 1px solid #E8DCC4; border-radius: 12px; padding: 38px 48px; box-shadow: 0 8px 24px rgba(90,60,30,0.08); font-family: 'Noto Serif SC', 'SimSun', 'Songti SC', serif; line-height: 2.05; color: #2C2825; text-align: justify; }
+    .book-reader p { text-indent: 2em; margin: 0 0 0.9em; }
+    @media (max-width: 700px) { .book-reader { padding: 22px 20px; } }
     .disclaimer { color: #B83B00; font-size: 0.85rem; padding: 10px; border-top: 1px dashed #D9C5A0; margin-top: 30px; }
     </style>
 """, unsafe_allow_html=True)
 
 DB_FILE = "tcm_database.db"
 ZIP_FILE = "tcm_database.zip"
-DB_SCHEMA_VERSION = 4  # 数据库结构变更时递增，使 Streamlit 资源缓存失效并重新执行迁移
+DB_SCHEMA_VERSION = 5  # 数据库结构变更时递增，使 Streamlit 资源缓存失效并重新执行迁移
 VERIF_PAGE_SIZE = 20  # 各种验方检索每页条数
 FORMULA_PAGE_SIZE = 20  # 传世名方基础检索每页条数
+BOOK_PAGE_CHARS = 1200  # 图书文本阅读每页字符数
+
+BOOK_CATEGORIES = [
+    "基础理论类",
+    "临床实践类",
+    "方药本草类",
+    "医案医话类",
+    "历史文献类",
+    "食疗养生类",
+]
+BOOK_FILE_TYPES = ["pdf", "doc", "docx", "wps", "txt", "md", "rtf"]
 
 FORMULA_TABLE = "formulas"
 RECIPE_TABLE = "recipes"
@@ -276,6 +294,31 @@ def ensure_schema(conn):
                   编者及其身份 TEXT,
                   品类 TEXT)''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS books
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  category TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  format TEXT,
+                  filename TEXT,
+                  text_content TEXT,
+                  char_count INTEGER DEFAULT 0,
+                  page_count INTEGER DEFAULT 0,
+                  file_size INTEGER DEFAULT 0,
+                  uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  UNIQUE(category, title))''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS book_files
+                 (book_id INTEGER PRIMARY KEY,
+                  content BLOB)''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS reading_progress
+                 (book_id INTEGER PRIMARY KEY,
+                  position INTEGER DEFAULT 0,
+                  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+    c.execute('''CREATE INDEX IF NOT EXISTS idx_books_category
+                 ON books(category, title)''')
+
     migrate_recipes_table(conn)
     migrate_verif_table(conn)
     ensure_admin_password(conn)
@@ -500,6 +543,212 @@ def split_verif_indications(raw):
     return [p.strip() for p in parts if p.strip()]
 
 
+def format_file_size(size):
+    try:
+        size = int(size or 0)
+    except (TypeError, ValueError):
+        return "0 B"
+    if size < 1024:
+        return f"{size} B"
+    size /= 1024
+    if size < 1024:
+        return f"{size:.1f} KB"
+    size /= 1024
+    if size < 1024:
+        return f"{size:.1f} MB"
+    return f"{size / 1024:.1f} GB"
+
+
+def decode_book_bytes(data):
+    """尽量以中文常见编码解码 TXT/类文本文件。"""
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+    for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk", "big5"):
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", errors="ignore")
+
+
+def extract_book_content(data, filename):
+    """提取图书文字，返回 (文本, PDF页数, 错误信息)。"""
+    ext = os.path.splitext(filename)[1].lower().lstrip(".")
+    if ext == "pdf":
+        try:
+            try:
+                from pypdf import PdfReader
+            except ImportError:
+                from PyPDF2 import PdfReader
+            reader = PdfReader(io.BytesIO(data))
+            texts = []
+            for page in reader.pages:
+                try:
+                    texts.append(page.extract_text() or "")
+                except Exception:
+                    texts.append("")
+            text = "\n\n".join(texts).replace("\r\n", "\n").replace("\r", "\n").strip()
+            return text, len(reader.pages), ""
+        except Exception as e:
+            return "", 0, f"PDF 解析失败：{e}"
+
+    if ext in ("docx", "doc", "wps"):
+        if data[:2] != b"PK":
+            return "", 0, "该文件为旧版 DOC/WPS 二进制格式，暂不支持提取文字；原文件已保存，可下载阅读。"
+        try:
+            from docx import Document
+            document = Document(io.BytesIO(data))
+            parts = [p.text for p in document.paragraphs]
+            for table in document.tables:
+                for row in table.rows:
+                    parts.append("\t".join(cell.text for cell in row.cells))
+            text = "\n".join(parts).strip()
+            return text, 0, ""
+        except Exception as e:
+            return "", 0, f"Word/WPS 解析失败：{e}"
+
+    text = decode_book_bytes(data).replace("\r\n", "\n").replace("\r", "\n").strip()
+    return text, 0, ""
+
+
+def upsert_book(conn, category, title, fmt, filename, data, text, page_count):
+    """按分类+书名新增或覆盖图书，保留已有阅读进度。"""
+    existing = conn.execute(
+        "SELECT id FROM books WHERE category=? AND title=?", (category, title)).fetchone()
+    size = len(data)
+    if existing:
+        book_id = int(existing[0])
+        conn.execute(
+            "UPDATE books SET format=?, filename=?, text_content=?, char_count=?, "
+            "page_count=?, file_size=?, uploaded_at=CURRENT_TIMESTAMP WHERE id=?",
+            (fmt, filename, text, len(text), int(page_count or 0), size, book_id))
+        is_new = False
+    else:
+        cur = conn.execute(
+            "INSERT INTO books (category, title, format, filename, text_content, "
+            "char_count, page_count, file_size) VALUES (?,?,?,?,?,?,?,?)",
+            (category, title, fmt, filename, text, len(text), int(page_count or 0), size))
+        book_id = int(cur.lastrowid)
+        is_new = True
+    conn.execute(
+        "INSERT OR REPLACE INTO book_files (book_id, content) VALUES (?, ?)",
+        (book_id, sqlite3.Binary(data)))
+    return book_id, is_new
+
+
+@st.cache_data(show_spinner=False)
+def load_books(category):
+    conn = get_connection()
+    try:
+        return pd.read_sql(
+            "SELECT id, title, format, filename, file_size, char_count, page_count "
+            "FROM books WHERE category=? ORDER BY title",
+            conn, params=(category,))
+    finally:
+        conn.close()
+
+
+@st.cache_data(show_spinner=False)
+def load_book_text(book_id):
+    conn = get_connection()
+    try:
+        return conn.execute(
+            "SELECT title, format, text_content, char_count, page_count, file_size "
+            "FROM books WHERE id=?", (book_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def load_book_file(book_id):
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT content FROM book_files WHERE book_id=?", (book_id,)).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def get_reading_position(book_id):
+    try:
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                "SELECT position FROM reading_progress WHERE book_id=?", (book_id,)).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+
+def save_reading_position(book_id, position):
+    try:
+        conn = get_connection()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO reading_progress (book_id, position, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP)",
+                (book_id, max(0, int(position))))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def build_book_pages(text):
+    pages = []
+    n = len(text)
+    start = 0
+    while start < n:
+        end = min(start + BOOK_PAGE_CHARS, n)
+        if end < n:
+            cut = text.rfind("\n", start + int(BOOK_PAGE_CHARS * 0.6), end)
+            if cut > start:
+                end = cut + 1
+        pages.append((start, text[start:end]))
+        start = end
+    return pages
+
+
+def book_page_html(text, font_size):
+    escaped = html.escape(text)
+    blocks = re.split(r"\n\s*\n", escaped)
+    parts = []
+    for block in blocks:
+        block = block.strip("\n")
+        if not block.strip():
+            continue
+        parts.append(f"<p>{block.replace(chr(10), '<br>')}</p>")
+    return (
+        f"<div class='book-reader' style='font-size:{int(font_size)}px'>"
+        + "".join(parts)
+        + "</div>"
+    )
+
+
+def render_book_nav(book_id, page_index, pages, suffix):
+    prev_col, next_col, info_col = st.columns([1, 1, 3])
+    with prev_col:
+        if st.button("⬅️ 上一页", disabled=page_index <= 0,
+                     key=f"book_prev_{suffix}_{book_id}"):
+            save_reading_position(book_id, pages[page_index - 1][0])
+            st.rerun()
+    with next_col:
+        if st.button("下一页 ➡️", disabled=page_index >= len(pages) - 1,
+                     key=f"book_next_{suffix}_{book_id}"):
+            save_reading_position(book_id, pages[page_index + 1][0])
+            st.rerun()
+    with info_col:
+        st.markdown(
+            f"<div style='text-align:right;padding-top:6px'>第 {page_index + 1} / {len(pages)} 页</div>",
+            unsafe_allow_html=True)
+
+
 @st.cache_data(show_spinner=False)
 def load_disease_options():
     """“屡试屡验方”（排除“被忽略的名方”）中清理、去重后的病名菜单。"""
@@ -573,6 +822,9 @@ def clear_search_caches():
     st.cache_data.clear()
     st.session_state.pop("verif_search_state", None)
     st.session_state.pop("formula_search_state", None)
+    for key in list(st.session_state.keys()):
+        if key.startswith("reader_pages_"):
+            st.session_state.pop(key, None)
 
 
 # --- 2. 侧边栏与路由 ---
@@ -581,6 +833,7 @@ st.sidebar.title("📜 中医典藏系统V2.0")
 page = st.sidebar.radio("模块导航", [
     "🔍 传世名方基础检索",
     "🤖 传世名方 AI 检索",
+    "📚 图书阅读",
     "🧾 各种验方检索",
     "🍲 四季养生食谱检索",
     "⚙️ 典藏后台管理系统"
@@ -913,7 +1166,108 @@ elif page == "🤖 传世名方 AI 检索":
                     st.error(f"AI 调用失败，请检查配置与网络：{e}")
 
 # ==========================================
-# 模块三：各种验方检索
+# 模块三：图书阅读
+# ==========================================
+elif page == "📚 图书阅读":
+    st.title("📚 图书阅读")
+    st.markdown("按分类选择书名阅读。阅读位置会自动记忆，下次打开同一本书会回到上次位置。")
+
+    reader_category = st.selectbox("图书分类", BOOK_CATEGORIES, key="reader_category")
+    books = load_books(reader_category)
+
+    if books.empty:
+        st.info("📭 该分类暂无图书。请进入【典藏后台管理系统 → 📚 图书库】批量导入。")
+    else:
+        selected_title = st.selectbox(
+            "选择书名", books["title"].tolist(),
+            key=f"reader_book_{reader_category}")
+        book_row = books[books["title"] == selected_title].iloc[0]
+        book_id = int(book_row["id"])
+        book = load_book_text(book_id)
+
+        if not book:
+            st.error("图书记录不存在，请刷新页面或重新导入。")
+        else:
+            title, fmt, text, char_count, page_count, file_size = book
+            st.subheader(f"📖 {safe_text(title)}")
+            st.caption(
+                f"{reader_category} · {safe_text(fmt).upper()} · "
+                f"{format_file_size(file_size)} · {int(char_count or 0)} 字")
+            font_size = st.slider("字体大小（文本阅读）", 14, 30, 18, 1, key="reader_font_size")
+            text = text or ""
+
+            if text.strip():
+                pages_key = f"reader_pages_{book_id}"
+                length_key = f"{pages_key}_length"
+                if st.session_state.get(length_key) != len(text):
+                    st.session_state[pages_key] = build_book_pages(text)
+                    st.session_state[length_key] = len(text)
+                pages = st.session_state.get(pages_key) or []
+                if pages:
+                    position = get_reading_position(book_id)
+                    position = max(0, min(position, len(text) - 1))
+                    starts = [p[0] for p in pages]
+                    page_index = bisect.bisect_right(starts, position) - 1
+                    page_index = max(0, min(page_index, len(pages) - 1))
+                    if position != starts[page_index]:
+                        save_reading_position(book_id, starts[page_index])
+
+                    st.caption("阅读位置会自动保存；可用下方按钮翻页。")
+                    render_book_nav(book_id, page_index, pages, "top")
+                    st.markdown(
+                        book_page_html(pages[page_index][1], font_size),
+                        unsafe_allow_html=True)
+                    render_book_nav(book_id, page_index, pages, "bottom")
+            elif safe_text(fmt) == "pdf" and int(page_count or 0) > 0:
+                content = load_book_file(book_id)
+                if content:
+                    page = max(1, min(get_reading_position(book_id) + 1, int(page_count)))
+                    st.info(
+                        "该 PDF 未提取到文字（可能是扫描版），以下按原版 PDF 阅读；"
+                        "页码位置会自动记忆，可用浏览器缩放调整大小。")
+                    if len(content) <= 15 * 1024 * 1024:
+                        b64 = base64.b64encode(content).decode("ascii")
+                        st.markdown(
+                            f'<iframe src="data:application/pdf;base64,{b64}#page={page}" '
+                            'width="100%" height="820" '
+                            'style="border:1px solid #E8DCC4;border-radius:8px;"></iframe>',
+                            unsafe_allow_html=True)
+                    else:
+                        st.pdf(content, height=820)
+                    prev_col, info_col, next_col = st.columns([1, 2, 1])
+                    with prev_col:
+                        if st.button("⬅️ 上一页", disabled=page <= 1,
+                                     key=f"pdf_prev_{book_id}"):
+                            save_reading_position(book_id, page - 2)
+                            st.rerun()
+                    with info_col:
+                        st.markdown(
+                            f"<div style='text-align:center;padding-top:6px'>"
+                            f"第 {page} / {int(page_count)} 页</div>",
+                            unsafe_allow_html=True)
+                    with next_col:
+                        if st.button("下一页 ➡️", disabled=page >= int(page_count),
+                                     key=f"pdf_next_{book_id}"):
+                            save_reading_position(book_id, page)
+                            st.rerun()
+                else:
+                    st.warning("未找到 PDF 原文件。")
+            else:
+                st.warning(
+                    "该文件未能提取出可阅读文字，可能是扫描版或旧版 DOC/WPS 格式。"
+                    "可以下载原文件阅读。")
+                content = load_book_file(book_id)
+                if content:
+                    download_name = safe_text(book_row.get("filename")) or f"{title}.{fmt}"
+                    st.download_button(
+                        "⬇️ 下载原文件",
+                        data=content,
+                        file_name=download_name,
+                        mime="application/octet-stream",
+                        key=f"book_download_{book_id}")
+
+# ==========================================
+# 模块四：各种验方检索
 # ==========================================
 elif page == "🧾 各种验方检索":
     st.title("🧾 各种验方检索")
@@ -1130,8 +1484,9 @@ elif page == "⚙️ 典藏后台管理系统":
     else:
         st.success("✅ 身份验证通过：田 夫 (为了系统流畅，请规范操作)")
 
-        tab_stat, tab_edit, tab_import, tab_password, tab_danger = st.tabs([
-            "📊 数据统计", "✏️ 数据维护(增删)", "📁 批量导入", "🔐 密码管理", "⚠️ 高危操作"
+        tab_stat, tab_edit, tab_import, tab_books, tab_password, tab_danger = st.tabs([
+            "📊 数据统计", "✏️ 数据维护(增删)", "📁 批量导入",
+            "📚 图书库", "🔐 密码管理", "⚠️ 高危操作"
         ])
 
         with tab_stat:
@@ -1141,14 +1496,16 @@ elif page == "⚙️ 典藏后台管理系统":
                 num_formulas = pd.read_sql("SELECT COUNT(*) as c FROM formulas", conn).iloc[0]['c']
                 num_recipes = pd.read_sql("SELECT COUNT(*) as c FROM recipes", conn).iloc[0]['c']
                 num_verif = pd.read_sql(f'SELECT COUNT(*) as c FROM "{VERIF_TABLE}"', conn).iloc[0]['c']
+                num_books = pd.read_sql("SELECT COUNT(*) as c FROM books", conn).iloc[0]['c']
                 num_logs = pd.read_sql("SELECT COUNT(*) as c FROM query_logs", conn).iloc[0]['c']
             finally:
                 conn.close()
-            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
             sc1.metric("📚 传世名方总数", num_formulas)
             sc2.metric("🧾 各种验方总数", num_verif)
             sc3.metric("🍲 养生食谱总数", num_recipes)
-            sc4.metric("👣 历史总检索次数", num_logs)
+            sc4.metric("📖 图书总数", num_books)
+            sc5.metric("👣 历史总检索次数", num_logs)
 
             st.markdown("### 📝 最近访客检索日志")
             conn = get_connection()
@@ -1510,6 +1867,92 @@ elif page == "⚙️ 典藏后台管理系统":
                             st.success(f"🎉 导入成功！过滤重复后库中共存有 {len(combined_df)} 条数据。")
                     except Exception as e:
                         st.error(f"导入出错，可能是文件格式不匹配: {e}")
+
+        with tab_books:
+            st.subheader("📚 图书批量导入")
+            st.caption("支持 PDF、DOC、DOCX、WPS、TXT、MD、RTF；书名取文件名（不含扩展名）。")
+            book_category = st.selectbox(
+                "图书分类", BOOK_CATEGORIES, key="book_import_category")
+            uploaded_books = st.file_uploader(
+                "选择图书文件（可多选）", type=BOOK_FILE_TYPES,
+                accept_multiple_files=True, key="book_import_files")
+
+            if st.button("开始导入图书", type="primary", key="book_import_run"):
+                if not uploaded_books:
+                    st.warning("请先选择图书文件。")
+                else:
+                    conn = get_connection()
+                    success_count = 0
+                    warnings = []
+                    try:
+                        total = len(uploaded_books)
+                        progress = st.progress(0.0, text="正在导入图书...")
+                        for i, uploaded in enumerate(uploaded_books, start=1):
+                            filename = os.path.basename(uploaded.name)
+                            title = os.path.splitext(filename)[0].strip() or "未命名图书"
+                            fmt = os.path.splitext(filename)[1].lower().lstrip(".")
+                            data = uploaded.getvalue()
+                            try:
+                                text, page_count, error = extract_book_content(data, filename)
+                                upsert_book(
+                                    conn, book_category, title, fmt, filename,
+                                    data, text, page_count)
+                                conn.commit()
+                                success_count += 1
+                                if error:
+                                    warnings.append(f"{filename}：{error}")
+                            except Exception as e:
+                                warnings.append(f"{filename}：导入失败 {e}")
+                            progress.progress(i / total, text=f"已处理 {i}/{total}：{filename}")
+                        progress.progress(1.0, text="图书导入完成")
+                    finally:
+                        conn.close()
+                    clear_search_caches()
+                    st.success(f"✅ 图书导入完成，共处理 {success_count} 个文件。")
+                    for message in warnings:
+                        st.warning(message)
+
+            st.markdown("### 现有图书")
+            conn = get_connection()
+            try:
+                books_df = pd.read_sql(
+                    "SELECT id, category AS 分类, title AS 书名, format AS 格式, "
+                    "file_size AS 文件字节, char_count AS 字数, page_count AS PDF页数, "
+                    "uploaded_at AS 导入时间 FROM books ORDER BY category, title", conn)
+            finally:
+                conn.close()
+
+            if books_df.empty:
+                st.info("图书库暂无图书。")
+            else:
+                display_df = books_df.copy()
+                display_df["文件大小"] = display_df["文件字节"].apply(format_file_size)
+                display_df = display_df.drop(columns=["文件字节"])
+                st.dataframe(display_df, hide_index=True)
+
+                st.markdown("### 删除图书")
+                del_book_id = st.number_input(
+                    "输入要删除的图书 ID", min_value=1, step=1, key="book_delete_id")
+                if st.button("🗑️ 删除此图书", key="book_delete_run"):
+                    conn = get_connection()
+                    try:
+                        conn.execute(
+                            "DELETE FROM reading_progress WHERE book_id=?", (del_book_id,))
+                        conn.execute(
+                            "DELETE FROM book_files WHERE book_id=?", (del_book_id,))
+                        cur = conn.execute("DELETE FROM books WHERE id=?", (del_book_id,))
+                        conn.commit()
+                        deleted = cur.rowcount
+                    finally:
+                        conn.close()
+                    clear_search_caches()
+                    if deleted:
+                        st.success("图书已删除。")
+                        st.rerun()
+                    else:
+                        st.warning("未找到该 ID 的图书。")
+
+            st.caption("旧版 DOC/WPS 二进制文件若无法提取文字，会保存原文件，可在阅读页下载。")
 
         with tab_password:
             st.subheader("🔐 后台登录密码")
