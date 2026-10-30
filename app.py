@@ -1250,6 +1250,13 @@ elif page == "📚 图书阅读":
                                      key=f"pdf_next_{book_id}"):
                             save_reading_position(book_id, page)
                             st.rerun()
+                    download_name = safe_text(book_row.get("filename")) or f"{title}.pdf"
+                    st.download_button(
+                        "⬇️ 下载 PDF 原文件",
+                        data=content,
+                        file_name=download_name,
+                        mime="application/pdf",
+                        key=f"pdf_download_{book_id}")
                 else:
                     st.warning("未找到 PDF 原文件。")
             else:
