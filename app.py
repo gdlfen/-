@@ -1180,7 +1180,12 @@ elif page == "📚 图书阅读":
     else:
         selected_title = st.selectbox(
             "选择书名", books["title"].tolist(),
+            index=None,
+            placeholder="请输入或选择书名…",
             key=f"reader_book_{reader_category}")
+        if not selected_title:
+            st.info("请从上方选择书名开始阅读。")
+            st.stop()
         book_row = books[books["title"] == selected_title].iloc[0]
         book_id = int(book_row["id"])
         book = load_book_text(book_id)
@@ -1225,7 +1230,7 @@ elif page == "📚 图书阅读":
                     st.info(
                         "该 PDF 未提取到文字（可能是扫描版），以下按原版 PDF 阅读；"
                         "页码位置会自动记忆，可用浏览器缩放调整大小。")
-                    if len(content) <= 15 * 1024 * 1024:
+                    if len(content) <= 4 * 1024 * 1024:
                         b64 = base64.b64encode(content).decode("ascii")
                         st.markdown(
                             f'<iframe src="data:application/pdf;base64,{b64}#page={page}" '
