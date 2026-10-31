@@ -1038,22 +1038,21 @@ def is_valid_book_backup(path):
 
 
 def sync_book_backup_static():
-    """把当前主数据库硬链接到 static，避免再复制/重建 60MB 图书库。"""
+    """把当前主数据库复制到 static，生成真实可下载文件。"""
     try:
         if not is_valid_book_backup(DB_FILE):
             return False
         os.makedirs(STATIC_DIR, exist_ok=True)
-        try:
-            if os.path.exists(BOOK_BACKUP_STATIC):
-                os.remove(BOOK_BACKUP_STATIC)
-            os.link(DB_FILE, BOOK_BACKUP_STATIC)
-            return True
-        except OSError:
-            temp_path = BOOK_BACKUP_STATIC + ".tmp"
-            shutil.copyfile(DB_FILE, temp_path)
-            os.replace(temp_path, BOOK_BACKUP_STATIC)
-            return True
+        temp_path = BOOK_BACKUP_STATIC + ".tmp"
+        shutil.copyfile(DB_FILE, temp_path)
+        os.replace(temp_path, BOOK_BACKUP_STATIC)
+        return is_valid_book_backup(BOOK_BACKUP_STATIC)
     except Exception:
+        try:
+            if os.path.exists(BOOK_BACKUP_STATIC + ".tmp"):
+                os.remove(BOOK_BACKUP_STATIC + ".tmp")
+        except Exception:
+            pass
         return False
 
 
