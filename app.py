@@ -1201,13 +1201,18 @@ def bootstrap_book_library():
 
 def render_chunk_book_uploader(section):
     is_batch = section == "batch"
+    is_large = section == "large"
     prefix = f"book_chunk_{section}_"
-    st.markdown("### 📚 批量导入（ZIP 压缩包）" if is_batch else "### 📖 单本导入")
-    st.caption(
-        ("把多本图书放进一个 ZIP，选择后自动分片上传并批量导入。"
-         if is_batch else
-         "选择单本图书，自动分片上传并导入。")
-        + f" 单文件上限 {MAX_BOOK_UPLOAD_MB}MB。")
+    if is_batch:
+        st.markdown("### 📚 批量导入（ZIP 压缩包）")
+        section_hint = "把多本图书放进一个 ZIP，选择后自动分片上传并批量导入。"
+    elif is_large:
+        st.markdown("### 📦 超大文件导入（单本）")
+        section_hint = "选择较大的单本图书，自动按 1MB 分片上传并导入。"
+    else:
+        st.markdown("### 📖 单本导入")
+        section_hint = "选择单本图书，自动分片上传并导入。"
+    st.caption(section_hint + f" 单文件上限 {MAX_BOOK_UPLOAD_MB}MB。")
     chunk_notice = st.session_state.pop(prefix + "notice", None)
     if chunk_notice:
         st.success(chunk_notice)
@@ -3051,6 +3056,7 @@ elif page == "⚙️ 典藏后台管理系统":
             st.caption("支持 PDF、DOC、DOCX、WPS、TXT、MD、RTF；书名取文件名（不含扩展名）。")
             render_chunk_book_uploader("batch")
             render_chunk_book_uploader("single")
+            render_chunk_book_uploader("large")
 
             st.markdown("### 现有图书")
             conn = get_connection()

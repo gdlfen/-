@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -32,6 +32,7 @@
   var nextIndex = 0;
   var sending = false;
   var ackIndex = -1;
+  var retryTimer = null;
 
   function send(value) {
     window.parent.postMessage({
@@ -78,6 +79,13 @@
       });
       nextIndex = index + 1;
       sending = false;
+      if (retryTimer) clearTimeout(retryTimer);
+      retryTimer = setTimeout(function () {
+        if (currentFile && ackIndex < index) {
+          statusEl.textContent = "等待服务器确认，正在重试第 " + (index + 1) + " 片…";
+          sendChunk(index);
+        }
+      }, 6000);
     };
     reader.onerror = function () {
       sending = false;
@@ -107,6 +115,8 @@
       nextIndex = 0;
       sending = false;
       ackIndex = -1;
+      if (retryTimer) clearTimeout(retryTimer);
+      retryTimer = null;
       fileInput.value = "";
       barEl.style.width = "0";
       statusEl.textContent = "选择图书文件或 ZIP 压缩包，将自动分片上传。";
@@ -114,6 +124,8 @@
     }
     if (typeof args.ack === "number") {
       ackIndex = args.ack;
+      if (retryTimer) clearTimeout(retryTimer);
+      retryTimer = null;
     }
     if (currentFile && !sending && nextIndex < totalChunks && nextIndex <= ackIndex + 1) {
       sendChunk(nextIndex);
