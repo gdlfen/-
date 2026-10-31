@@ -27,6 +27,7 @@
   var uploadId = null;
   var chunks = [];
   var lastStart = 0;
+  var waitTimer = null;
 
   function send(value) {
     window.parent.postMessage({
@@ -43,6 +44,8 @@
     return bytes;
   }
   function reset() {
+    if (waitTimer) clearTimeout(waitTimer);
+    waitTimer = null;
     active = false;
     index = -1;
     total = 0;
@@ -81,6 +84,14 @@
     lastStart = Date.now();
     btn.disabled = true;
     statusEl.textContent = "正在准备备份分片…";
+    if (waitTimer) clearTimeout(waitTimer);
+    waitTimer = setTimeout(function () {
+      if (index < 0) {
+        active = false;
+        btn.disabled = false;
+        statusEl.textContent = "服务器未返回备份分片，请重试；如果反复失败请查看日志。";
+      }
+    }, 20000);
     send({ action: "start", id: uploadId, at: lastStart });
   });
   window.addEventListener("message", function (event) {
@@ -92,6 +103,10 @@
     }
     if (!args.active || !args.chunk) return;
     if (args.id !== uploadId) return;
+    if (waitTimer) {
+      clearTimeout(waitTimer);
+      waitTimer = null;
+    }
     var incoming = Number(args.index);
     if (incoming !== index + 1) return;
     index = incoming;

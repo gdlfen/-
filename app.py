@@ -56,6 +56,7 @@ VERIF_PAGE_SIZE = 20  # 各种验方检索每页条数
 FORMULA_PAGE_SIZE = 20  # 传世名方基础检索每页条数
 BOOK_PAGE_CHARS = 1200  # 图书文本阅读每页字符数
 MAX_BOOK_UPLOAD_MB = 900  # 单个图书文件上限（.streamlit/config.toml 设置为 1024MB）
+BACKUP_DOWNLOAD_CHUNK = 1024 * 1024  # 备份下载每片 1MB，兼容云端的 WebSocket 消息限制
 BOOK_BACKUP_FILE = os.environ.get(
     "TCM_BOOK_BACKUP_FILE",
     os.path.join(os.path.dirname(os.path.abspath(DB_FILE)), "book_library_backup.db"))
@@ -3115,9 +3116,9 @@ elif page == "⚙️ 典藏后台管理系统":
                     if dl_active and 0 <= dl_index < dl_total:
                         try:
                             with open(BOOK_BACKUP_FILE, "rb") as backup_file:
-                                backup_file.seek(dl_index * 8 * 1024 * 1024)
+                                backup_file.seek(dl_index * BACKUP_DOWNLOAD_CHUNK)
                                 dl_chunk = base64.b64encode(
-                                    backup_file.read(8 * 1024 * 1024)).decode("ascii")
+                                    backup_file.read(BACKUP_DOWNLOAD_CHUNK)).decode("ascii")
                         except Exception:
                             dl_active = False
                     dl_event = download_comp(
@@ -3135,7 +3136,7 @@ elif page == "⚙️ 典藏后台管理系统":
                             try:
                                 size = os.path.getsize(BOOK_BACKUP_FILE)
                                 total_chunks = max(
-                                    1, (size + 8 * 1024 * 1024 - 1) // (8 * 1024 * 1024))
+                                    1, (size + BACKUP_DOWNLOAD_CHUNK - 1) // BACKUP_DOWNLOAD_CHUNK)
                                 st.session_state["book_backup_dl_active"] = True
                                 st.session_state["book_backup_dl_index"] = 0
                                 st.session_state["book_backup_dl_total"] = total_chunks
