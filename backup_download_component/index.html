@@ -29,6 +29,7 @@
   var lastStart = 0;
   var waitTimer = null;
   var ackTimer = null;
+  var ready = false;
 
   function send(value) {
     window.parent.postMessage({
@@ -50,6 +51,7 @@
     waitTimer = null;
     ackTimer = null;
     active = false;
+    ready = false;
     index = -1;
     total = 0;
     chunks = [];
@@ -58,11 +60,19 @@
     btn.textContent = "⬇️ 下载图书库备份（.db）";
     statusEl.textContent = "";
   }
-  function finishDownload() {
+  function prepareDownload() {
     if (ackTimer) clearTimeout(ackTimer);
     if (waitTimer) clearTimeout(waitTimer);
     ackTimer = null;
     waitTimer = null;
+    active = false;
+    ready = true;
+    btn.disabled = false;
+    btn.textContent = "💾 保存备份文件";
+    statusEl.textContent = "备份已接收完成，请点击“保存备份文件”选择下载位置。";
+  }
+  function triggerDownload() {
+    if (!chunks.length) return;
     var blob = new Blob(chunks, { type: "application/octet-stream" });
     var url = URL.createObjectURL(blob);
     var targetDoc = document;
@@ -77,8 +87,7 @@
     targetDoc.body.removeChild(a);
     setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
     statusEl.textContent = "下载已开始。";
-    active = false;
-    btn.disabled = false;
+    ready = false;
     btn.textContent = "⬇️ 再次下载图书库备份";
     send({ action: "done", id: uploadId });
   }
@@ -95,8 +104,13 @@
     }
   }
   btn.addEventListener("click", function () {
+    if (ready) {
+      triggerDownload();
+      return;
+    }
     if (active) return;
     chunks = [];
+    ready = false;
     index = -1;
     total = 0;
     uploadId = String(Date.now()) + "-" + Math.random().toString(36).slice(2, 10);
@@ -133,13 +147,13 @@
     filename = args.filename || filename;
     chunks.push(b64ToBytes(args.chunk));
     var pct = total ? Math.min(100, Math.round((index + 1) * 100 / total)) : 0;
-    statusEl.textContent = "正在接收备份：" + pct + "%";
+    statusEl.textContent = "正在接收备份：" + (index + 1) + "/" + total + "（" + pct + "%）";
     if (ackTimer) {
       clearTimeout(ackTimer);
       ackTimer = null;
     }
     if (index >= total - 1) {
-      finishDownload();
+      prepareDownload();
     } else {
       requestNext(0);
     }

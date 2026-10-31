@@ -1254,7 +1254,10 @@ READER_GESTURE_JS = r"""
       var dx = e.changedTouches[0].clientX - sx;
       var dy = e.changedTouches[0].clientY - sy;
       var horizontal = Math.abs(dx) > 140 && Math.abs(dx) > Math.abs(dy) * 1.5;
-      if (horizontal) {
+      var landscapeMode = active.getAttribute("data-tcm-landscape") === "1";
+      if (landscapeMode && Math.abs(dy) > 140 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+        turn(dy < 0 ? "next" : "prev");
+      } else if (horizontal) {
         turn(dx < 0 ? "next" : "prev");
       }
       active = null;
@@ -1355,6 +1358,8 @@ READER_GESTURE_JS_V2 = r"""
         if (img) {
           var width = Math.max(60, Math.min(500, value));
           img.style.width = width + "%";
+          img.style.maxWidth = "none";
+          img.style.maxHeight = "none";
         }
       }
     }
@@ -1430,7 +1435,10 @@ READER_GESTURE_JS_V2 = r"""
       var dx = e.changedTouches[0].clientX - sx;
       var dy = e.changedTouches[0].clientY - sy;
       var horizontal = Math.abs(dx) > 140 && Math.abs(dx) > Math.abs(dy) * 1.5;
-      if (horizontal) {
+      var landscapeMode = active.getAttribute("data-tcm-landscape") === "1";
+      if (landscapeMode && Math.abs(dy) > 140 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+        turn(dy < 0 ? "next" : "prev");
+      } else if (horizontal) {
         turn(dx < 0 ? "next" : "prev");
       }
       active = null;
@@ -1484,14 +1492,9 @@ READER_GESTURE_JS_V2 = r"""
           if (imgPortrait) {
             imgPortrait.style.width = "100%";
             imgPortrait.style.maxHeight = "none";
-            imgPortrait.style.maxWidth = "100%";
+            imgPortrait.style.maxWidth = "none";
           }
           if (orientBtn) orientBtn.textContent = "横屏";
-          try {
-            if (P.screen && P.screen.orientation && P.screen.orientation.unlock) {
-              P.screen.orientation.unlock();
-            }
-          } catch (e) {}
         } else {
           el.setAttribute("data-tcm-landscape", "1");
           el.style.transformOrigin = "center center";
@@ -1504,17 +1507,11 @@ READER_GESTURE_JS_V2 = r"""
           el.style.maxHeight = "none";
           var imgLandscape = el.querySelector("img");
           if (imgLandscape) {
-            imgLandscape.style.width = "auto";
-            imgLandscape.style.maxWidth = "100%";
-            imgLandscape.style.maxHeight = "calc(100vw - 6vh)";
+            imgLandscape.style.width = "100%";
+            imgLandscape.style.maxWidth = "none";
+            imgLandscape.style.maxHeight = "none";
           }
           if (orientBtn) orientBtn.textContent = "竖屏";
-          try {
-            if (P.screen && P.screen.orientation && P.screen.orientation.lock) {
-              var p = P.screen.orientation.lock("landscape");
-              if (p && p.catch) p.catch(function () {});
-            }
-          } catch (e) {}
         }
       } catch (e) {}
     }
@@ -1536,11 +1533,6 @@ READER_GESTURE_JS_V2 = r"""
         if (orient) orient.remove();
         var btn = document.getElementById("fsBtn");
         if (btn) btn.textContent = "⛶ 全屏阅读";
-        try {
-          if (P.screen && P.screen.orientation && P.screen.orientation.unlock) {
-            P.screen.orientation.unlock();
-          }
-        } catch (e) {}
       } catch (e) {}
     }
     function toggleOverlay() {
@@ -1593,14 +1585,6 @@ READER_GESTURE_JS_V2 = r"""
           "background:#FFFFFF;color:#792D11;font-size:14px;cursor:pointer;";
         orient.addEventListener("click", function () { toggleLandscape(el); });
         doc.body.appendChild(orient);
-        try {
-          if (P.screen && P.screen.orientation && P.screen.orientation.lock) {
-            var orientationPromise = P.screen.orientation.lock("landscape");
-            if (orientationPromise && orientationPromise.catch) {
-              orientationPromise.catch(function () {});
-            }
-          }
-        } catch (e) {}
         var btn = document.getElementById("fsBtn");
         if (btn) btn.textContent = "退出全屏";
       } catch (e) {}
