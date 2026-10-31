@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Backup Download</title>
+  <style>
+    html, body { margin:0; padding:0; background:transparent; font-family:'Noto Sans SC','Microsoft YaHei',sans-serif; }
+    #dlBtn { padding:8px 14px; border:1px solid #792D11; border-radius:6px;
+      background:#792D11; color:#FFFFFF; font-size:14px; font-weight:bold; cursor:pointer; }
+    #dlBtn:disabled { opacity:0.55; cursor:default; }
+    #status { margin-top:5px; color:#5A4A3A; font-size:12px; min-height:16px; }
+  </style>
+</head>
+<body>
+<button id="dlBtn" type="button">⬇️ 下载图书库备份（.db）</button>
+<div id="status"></div>
+<script>
+(function () {
+  "use strict";
+  var btn = document.getElementById("dlBtn");
+  var statusEl = document.getElementById("status");
+  var active = false;
+  var index = -1;
+  var total = 0;
+  var filename = "book_library_backup.db";
+  var uploadId = null;
+  var chunks = [];
+  var lastStart = 0;
+
+  function send(value) {
+    window.parent.postMessage({
+      isStreamlitMessage: true,
+      type: "streamlit:setComponentValue",
+      value: value,
+      dataType: "json"
+    }, "*");
+  }
+  function b64ToBytes(b64) {
+    var binary = atob(b64 || "");
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+  function reset() {
+    active = false;
+    index = -1;
+    total = 0;
+    chunks = [];
+    uploadId = null;
+    btn.disabled = false;
+    btn.textContent = "⬇️ 下载图书库备份（.db）";
+    statusEl.textContent = "";
+  }
+  function finishDownload() {
+    var blob = new Blob(chunks, { type: "application/octet-stream" });
+    var url = URL.createObjectURL(blob);
+    var targetDoc = document;
+    try {
+      if (window.parent && window.parent.document) targetDoc = window.parent.document;
+    } catch (e) {}
+    var a = targetDoc.createElement("a");
+    a.href = url;
+    a.download = filename || "book_library_backup.db";
+    targetDoc.body.appendChild(a);
+    a.click();
+    targetDoc.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+    statusEl.textContent = "下载已开始。";
+    active = false;
+    btn.disabled = false;
+    btn.textContent = "⬇️ 再次下载图书库备份";
+    send({ action: "done", id: uploadId });
+  }
+  btn.addEventListener("click", function () {
+    if (active) return;
+    chunks = [];
+    index = -1;
+    total = 0;
+    uploadId = String(Date.now()) + "-" + Math.random().toString(36).slice(2, 10);
+    lastStart = Date.now();
+    btn.disabled = true;
+    statusEl.textContent = "正在准备备份分片…";
+    send({ action: "start", id: uploadId, at: lastStart });
+  });
+  window.addEventListener("message", function (event) {
+    if (!event.data || event.data.type !== "streamlit:render") return;
+    var args = event.data.args || {};
+    if (args.reset) {
+      reset();
+      return;
+    }
+    if (!args.active || !args.chunk) return;
+    if (args.id !== uploadId) return;
+    var incoming = Number(args.index);
+    if (incoming !== index + 1) return;
+    index = incoming;
+    total = Number(args.total) || 0;
+    filename = args.filename || filename;
+    chunks.push(b64ToBytes(args.chunk));
+    var pct = total ? Math.min(100, Math.round((index + 1) * 100 / total)) : 0;
+    statusEl.textContent = "正在接收备份：" + pct + "%";
+    if (index >= total - 1) {
+      finishDownload();
+    } else {
+      send({ action: "ack", id: uploadId, index: index });
+    }
+  });
+  window.parent.postMessage({
+    isStreamlitMessage: true,
+    type: "streamlit:componentReady",
+    apiVersion: 1
+  }, "*");
+  window.parent.postMessage({
+    isStreamlitMessage: true,
+    type: "streamlit:setFrameHeight",
+    height: 62
+  }, "*");
+})();
+</script>
+</body>
+</html>
