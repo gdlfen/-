@@ -41,6 +41,10 @@ st.markdown("""
     .page-fade { animation: pageFade 0.18s ease-out; }
     #tcm-reader-content:fullscreen { width:100vw; height:100vh; max-width:none; max-height:none; border:0; border-radius:0; padding:4vh 6vw; background:#FFFFFF; overflow:auto; }
     #tcm-reader-content:fullscreen img { max-height:none; }
+    @media (orientation: landscape) {
+      #tcm-reader-content[data-tcm-overlay="1"] { padding:2vh 4vw; }
+      #tcm-reader-content[data-tcm-overlay="1"] img { width:auto !important; max-width:100%; max-height:calc(100vh - 4vh); margin:0 auto; }
+    }
     @media (max-width: 700px) { .book-reader { padding: 22px 20px; max-height: 70vh; } }
     .disclaimer { color: #B83B00; font-size: 0.85rem; padding: 10px; border-top: 1px dashed #D9C5A0; margin-top: 30px; }
     </style>
@@ -1138,6 +1142,10 @@ def bootstrap_book_library():
                 backup_book_library()
         elif not main_count and backup_count:
             restore_book_library_from_backup()
+        elif main_count and backup_count:
+            if not st.session_state.get("_book_static_synced"):
+                st.session_state["_book_static_synced"] = True
+                sync_book_backup_static()
     except Exception:
         pass
 
@@ -1488,6 +1496,11 @@ READER_GESTURE_JS_V2 = r"""
         if (close) close.remove();
         var btn = document.getElementById("fsBtn");
         if (btn) btn.textContent = "⛶ 全屏阅读";
+        try {
+          if (P.screen && P.screen.orientation && P.screen.orientation.unlock) {
+            P.screen.orientation.unlock();
+          }
+        } catch (e) {}
       } catch (e) {}
     }
     function toggleOverlay() {
@@ -1531,6 +1544,14 @@ READER_GESTURE_JS_V2 = r"""
           "background:#792D11;color:#FFFFFF;font-size:14px;cursor:pointer;";
         close.addEventListener("click", function () { exitOverlay(el); });
         doc.body.appendChild(close);
+        try {
+          if (P.screen && P.screen.orientation && P.screen.orientation.lock) {
+            var orientationPromise = P.screen.orientation.lock("landscape");
+            if (orientationPromise && orientationPromise.catch) {
+              orientationPromise.catch(function () {});
+            }
+          }
+        } catch (e) {}
         var btn = document.getElementById("fsBtn");
         if (btn) btn.textContent = "退出全屏";
       } catch (e) {}
@@ -1715,9 +1736,15 @@ st.sidebar.markdown("""
 # 系统总览
 # ==========================================
 if page == "🏠 系统总览":
-    st.title("🏥 中医典藏检索系统")
     st.markdown(
-        "## 欢迎使用《中医典藏检索系统》！\n\n"
+        "<h1 style='font-size:2rem; line-height:1.35; margin-bottom:0.3rem;'>"
+        "🏥 中医典藏检索系统V2.0</h1>",
+        unsafe_allow_html=True)
+    st.markdown(
+        "<div style='font-size:1.15rem; font-weight:600; color:#3A2A1E; "
+        "margin-bottom:0.5rem;'>欢迎使用《中医典藏检索系统》！</div>",
+        unsafe_allow_html=True)
+    st.markdown(
         "该系统功能有：**传世名方基础检索、传世名方 AI 检索、图书阅读、"
         "各种验方检索、四季养生食谱检索**。")
     st.info("请点开左侧“模块导航”，选择您需要的功能选项。")
@@ -2405,7 +2432,10 @@ elif page == "🍲 四季养生食谱检索":
 # 模块五：后台管理系统
 # ==========================================
 elif page == "⚙️ 典藏后台管理系统":
-    st.title("⚙️ 系统中枢及数据管理")
+    st.markdown(
+        "<h1 style='font-size:2.1rem; line-height:1.35; margin-bottom:0.35rem;'>"
+        "⚙️ 系统中枢及数据管理</h1>",
+        unsafe_allow_html=True)
 
     if "admin_auth" not in st.session_state:
         st.session_state.admin_auth = False
@@ -2810,9 +2840,14 @@ elif page == "⚙️ 典藏后台管理系统":
             st.caption("支持 PDF、DOC、DOCX、WPS、TXT、MD、RTF；书名取文件名（不含扩展名）。")
             book_category = st.selectbox(
                 "图书分类", BOOK_CATEGORIES, key="book_import_category")
+            upload_version = st.session_state.get("book_upload_version", 0)
             uploaded_books = st.file_uploader(
                 "选择图书文件（可多选）", type=BOOK_FILE_TYPES,
-                accept_multiple_files=True, key="book_import_files")
+                accept_multiple_files=True,
+                key=f"book_import_files_{upload_version}")
+            if st.button("🧹 清空已选文件", key=f"book_upload_clear_{upload_version}"):
+                st.session_state["book_upload_version"] = upload_version + 1
+                st.rerun()
             st.caption(f"单个文件上限约 {MAX_BOOK_UPLOAD_MB}MB；超过 200MB 的 PDF 会按扫描版处理。")
 
             if st.button("开始导入图书", type="primary", key="book_import_run"):
@@ -3013,24 +3048,18 @@ elif page == "⚙️ 典藏后台管理系统":
                         "备份失败：主库中没有可读取的图书，或备份文件无法写入。"
                         f"请确认图书库中有图书，并查看服务器磁盘空间/权限。{detail}")
             if is_valid_book_backup(BOOK_BACKUP_STATIC):
+                static_version = os.stat(BOOK_BACKUP_STATIC).st_mtime_ns
                 st.markdown(
-                    '<a href="/app/static/book_library_backup.db" download '
+                    f'<a href="/app/static/book_library_backup.db?v={static_version}" '
+                    'download target="_blank" '
                     'style="display:inline-block;padding:8px 14px;margin:4px 0;'
                     'background:#792D11;color:#FFFFFF;border-radius:6px;'
                     'text-decoration:none;font-weight:bold;">'
                     '⬇️ 下载图书库备份（.db）</a>',
                     unsafe_allow_html=True)
-                st.caption("备份文件较大，浏览器会直接下载，不经过应用上传通道。")
+                st.caption("备份文件较大，浏览器会直接下载；链接带版本号，避免下载到旧缓存。")
             elif is_valid_book_backup(BOOK_BACKUP_FILE):
                 st.info("请先点击上方“生成 / 更新图书库备份”，生成静态下载文件。")
-                st.markdown(
-                    '<a href="/app/static/book_library_backup.db" download '
-                    'style="display:inline-block;padding:8px 14px;margin:4px 0;'
-                    'background:#792D11;color:#FFFFFF;border-radius:6px;'
-                    'text-decoration:none;font-weight:bold;">'
-                    '⬇️ 下载图书库备份（.db）</a>',
-                    unsafe_allow_html=True)
-                st.caption("备份文件较大，浏览器会直接下载，不经过应用上传通道。")
             elif os.path.exists(BOOK_BACKUP_FILE):
                 st.info("请先点击上方“生成 / 更新图书库备份”，再下载。")
 
