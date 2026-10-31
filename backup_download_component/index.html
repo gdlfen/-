@@ -30,6 +30,8 @@
   var waitTimer = null;
   var ackTimer = null;
   var ready = false;
+  var saveLink = null;
+  var saveUrl = null;
 
   function send(value) {
     window.parent.postMessage({
@@ -50,6 +52,10 @@
     if (ackTimer) clearTimeout(ackTimer);
     waitTimer = null;
     ackTimer = null;
+    if (saveLink && saveLink.parentNode) saveLink.parentNode.removeChild(saveLink);
+    saveLink = null;
+    if (saveUrl) URL.revokeObjectURL(saveUrl);
+    saveUrl = null;
     active = false;
     ready = false;
     index = -1;
@@ -67,29 +73,33 @@
     waitTimer = null;
     active = false;
     ready = true;
-    btn.disabled = false;
-    btn.textContent = "💾 保存备份文件";
-    statusEl.textContent = "备份已接收完成，请点击“保存备份文件”选择下载位置。";
-  }
-  function triggerDownload() {
-    if (!chunks.length) return;
+    if (saveLink && saveLink.parentNode) saveLink.parentNode.removeChild(saveLink);
+    if (saveUrl) URL.revokeObjectURL(saveUrl);
     var blob = new Blob(chunks, { type: "application/octet-stream" });
-    var url = URL.createObjectURL(blob);
+    saveUrl = URL.createObjectURL(blob);
     var targetDoc = document;
     try {
       if (window.parent && window.parent.document) targetDoc = window.parent.document;
     } catch (e) {}
-    var a = targetDoc.createElement("a");
-    a.href = url;
-    a.download = filename || "book_library_backup.db";
-    targetDoc.body.appendChild(a);
-    a.click();
-    targetDoc.body.removeChild(a);
-    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
-    statusEl.textContent = "下载已开始。";
-    ready = false;
-    btn.textContent = "⬇️ 再次下载图书库备份";
-    send({ action: "done", id: uploadId });
+    saveLink = targetDoc.createElement("a");
+    saveLink.id = "tcm-backup-save-link";
+    saveLink.href = saveUrl;
+    saveLink.download = filename || "book_library_backup.db";
+    saveLink.textContent = "💾 点击保存图书库备份（.db）";
+    saveLink.style.cssText = "position:fixed;top:18px;left:50%;transform:translateX(-50%);" +
+      "z-index:2147483647;display:inline-block;padding:10px 18px;background:#1F7A3D;" +
+      "color:#FFFFFF;border:1px solid #145A2C;border-radius:8px;font-size:15px;" +
+      "font-weight:bold;text-decoration:none;box-shadow:0 4px 16px rgba(0,0,0,0.25);";
+    saveLink.addEventListener("click", function () {
+      setTimeout(function () {
+        send({ action: "done", id: uploadId });
+        reset();
+      }, 1500);
+    });
+    targetDoc.body.appendChild(saveLink);
+    btn.disabled = true;
+    btn.textContent = "✅ 备份已接收";
+    statusEl.textContent = "请点击页面顶部的“💾 点击保存图书库备份”链接。";
   }
   function requestNext(attempt) {
     if (index >= total - 1) return;
@@ -104,10 +114,7 @@
     }
   }
   btn.addEventListener("click", function () {
-    if (ready) {
-      triggerDownload();
-      return;
-    }
+    if (ready) return;
     if (active) return;
     chunks = [];
     ready = false;

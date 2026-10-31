@@ -36,7 +36,7 @@ st.markdown("""
     mark.yellow-highlight { background-color: #FFF2CC; color: #B83B00; font-weight: bold; padding: 0 4px; border-radius: 2px; border-bottom: 2px solid #F0B27A; }
     .book-reader { max-width: 920px; max-height: 74vh; overflow-y: auto; box-sizing: border-box; margin: 18px auto 18px; background: #FFFFFF; border: 1px solid #D8C7A8; border-radius: 12px; padding: 38px 48px; box-shadow: 0 8px 24px rgba(90,60,30,0.12); font-family: 'Noto Serif SC', 'SimSun', 'Songti SC', serif; line-height: 2.05; color: #0B0806; text-align: justify; }
     .book-reader p { color: #0B0806 !important; font-weight: 500; text-indent: 2em; margin: 0 0 0.9em; }
-    #tcm-reader-content { touch-action: pan-y; }
+    #tcm-reader-content { touch-action: auto; }
     @keyframes pageFade { from { transform: translateX(8px); } to { transform: none; } }
     .page-fade { animation: pageFade 0.18s ease-out; }
     #tcm-reader-content:fullscreen { width:100vw; height:100vh; max-width:none; max-height:none; border:0; border-radius:0; padding:4vh 6vw; background:#FFFFFF; overflow:auto; }
@@ -1254,10 +1254,7 @@ READER_GESTURE_JS = r"""
       var dx = e.changedTouches[0].clientX - sx;
       var dy = e.changedTouches[0].clientY - sy;
       var horizontal = Math.abs(dx) > 140 && Math.abs(dx) > Math.abs(dy) * 1.5;
-      var landscapeMode = active.getAttribute("data-tcm-landscape") === "1";
-      if (landscapeMode && Math.abs(dy) > 140 && Math.abs(dy) > Math.abs(dx) * 1.5) {
-        turn(dy < 0 ? "next" : "prev");
-      } else if (horizontal) {
+      if (horizontal && ((dx < 0 && startAtRight) || (dx > 0 && startAtLeft))) {
         turn(dx < 0 ? "next" : "prev");
       }
       active = null;
@@ -1416,7 +1413,8 @@ READER_GESTURE_JS_V2 = r"""
       if (!active || !e.touches || !e.touches.length) return;
       var mx = e.touches[0].clientX - sx;
       var my = e.touches[0].clientY - sy;
-      if (Math.abs(mx) > Math.abs(my) && Math.abs(mx) > 20) {
+      if (Math.abs(mx) > Math.abs(my) && Math.abs(mx) > 20 &&
+          ((mx < 0 && startAtRight) || (mx > 0 && startAtLeft))) {
         e.preventDefault();
       }
     }
@@ -1435,10 +1433,7 @@ READER_GESTURE_JS_V2 = r"""
       var dx = e.changedTouches[0].clientX - sx;
       var dy = e.changedTouches[0].clientY - sy;
       var horizontal = Math.abs(dx) > 140 && Math.abs(dx) > Math.abs(dy) * 1.5;
-      var landscapeMode = active.getAttribute("data-tcm-landscape") === "1";
-      if (landscapeMode && Math.abs(dy) > 140 && Math.abs(dy) > Math.abs(dx) * 1.5) {
-        turn(dy < 0 ? "next" : "prev");
-      } else if (horizontal) {
+      if (horizontal && ((dx < 0 && startAtRight) || (dx > 0 && startAtLeft))) {
         turn(dx < 0 ? "next" : "prev");
       }
       active = null;
