@@ -1199,34 +1199,41 @@ def bootstrap_book_library():
         pass
 
 
-def render_chunk_book_uploader():
-    st.markdown("### 📦 超大文件 / 批量 ZIP 分片上传")
+def render_chunk_book_uploader(section):
+    is_batch = section == "batch"
+    prefix = f"book_chunk_{section}_"
+    st.markdown("### 📚 批量导入（ZIP 压缩包）" if is_batch else "### 📖 单本导入")
     st.caption(
-        "浏览器按 1MB 分片发送，绕过单次上传限制；"
-        f"支持单本图书或包含多本图书的 ZIP，单文件上限 {MAX_BOOK_UPLOAD_MB}MB。")
-    chunk_notice = st.session_state.pop("book_chunk_notice", None)
+        ("把多本图书放进一个 ZIP，选择后自动分片上传并批量导入。"
+         if is_batch else
+         "选择单本图书，自动分片上传并导入。")
+        + f" 单文件上限 {MAX_BOOK_UPLOAD_MB}MB。")
+    chunk_notice = st.session_state.pop(prefix + "notice", None)
     if chunk_notice:
         st.success(chunk_notice)
     chunk_category = st.selectbox(
-        "分片上传分类", BOOK_CATEGORIES, key="chunk_upload_category")
+        "导入分类", BOOK_CATEGORIES,
+        key=prefix + "category")
     chunk_comp = _get_chunk_upload_component()
     if chunk_comp is None:
         st.warning("分片上传组件缺失，请检查 chunk_upload_component 目录。")
         return
-    reset_flag = st.session_state.pop("book_chunk_reset", False)
+    reset_flag = st.session_state.pop(prefix + "reset", False)
     if reset_flag:
-        st.session_state["book_chunk_done"] = False
-        st.session_state["book_chunk_last"] = ""
-        st.session_state["book_chunk_ack"] = -1
+        st.session_state[prefix + "done"] = False
+        st.session_state[prefix + "last"] = ""
+        st.session_state[prefix + "ack"] = -1
+    accept = ".zip" if is_batch else ",".join(
+        "." + ext for ext in BOOK_FILE_TYPES)
     chunk_event = chunk_comp(
-        ack=int(st.session_state.get("book_chunk_ack", -1)),
+        ack=int(st.session_state.get(prefix + "ack", -1)),
         reset=bool(reset_flag),
-        accept=",".join("." + ext for ext in BOOK_FILE_TYPES + ["zip"]),
-        key="book_chunk_uploader")
+        accept=accept,
+        key=prefix + "uploader")
     if reset_flag:
         chunk_event = None
     if (isinstance(chunk_event, dict) and chunk_event.get("data")
-            and not st.session_state.get("book_chunk_done")):
+            and not st.session_state.get(prefix + "done")):
         try:
             upload_id = re.sub(
                 r"[^A-Za-z0-9_-]", "",
@@ -1239,26 +1246,29 @@ def render_chunk_book_uploader():
             if (not upload_id or index < 0 or total <= 0 or size <= 0
                     or size > MAX_BOOK_UPLOAD_MB * 1024 * 1024):
                 raise ValueError("分片参数无效或文件超过上限")
-            if fmt not in BOOK_FILE_TYPES and fmt != "zip":
+            if is_batch:
+                if fmt != "zip":
+                    raise ValueError("批量导入只接受 ZIP 压缩包")
+            elif fmt not in BOOK_FILE_TYPES:
                 raise ValueError("不支持的文件类型")
             os.makedirs(BOOK_UPLOAD_DIR, exist_ok=True)
             part_path = os.path.join(BOOK_UPLOAD_DIR, f"{upload_id}.part")
             event_key = f"{upload_id}:{index}"
-            is_new = st.session_state.get("book_chunk_last") != event_key
+            is_new = st.session_state.get(prefix + "last") != event_key
             if is_new:
                 if index == 0 and os.path.exists(part_path):
                     os.remove(part_path)
                 with open(part_path, "ab") as part:
                     part.write(base64.b64decode(
                         str(chunk_event.get("data", ""))))
-                st.session_state["book_chunk_last"] = event_key
-            st.session_state["book_chunk_ack"] = index
+                st.session_state[prefix + "last"] = event_key
+            st.session_state[prefix + "ack"] = index
 
             if is_new and index == total - 1:
                 actual_size = os.path.getsize(part_path)
                 if actual_size != size:
                     raise ValueError(f"文件不完整：{actual_size}/{size} 字节")
-                if fmt == "zip":
+                if is_batch:
                     zip_success, zip_warnings = import_books_from_zip(
                         part_path, chunk_category)
                     notice = f"✅ ZIP 批量导入完成：成功 {zip_success} 本。"
@@ -1282,17 +1292,17 @@ def render_chunk_book_uploader():
                 except Exception:
                     pass
                 clear_search_caches()
-                st.session_state["book_chunk_done"] = True
-                st.session_state["book_chunk_reset"] = True
-                st.session_state["book_chunk_ack"] = -1
-                st.session_state["book_chunk_notice"] = notice
+                st.session_state[prefix + "done"] = True
+                st.session_state[prefix + "reset"] = True
+                st.session_state[prefix + "ack"] = -1
+                st.session_state[prefix + "notice"] = notice
                 st.rerun(scope="app")
             elif is_new:
                 st.rerun(scope="app")
         except Exception as e:
             st.error(f"分片上传失败：{e}")
-            st.session_state["book_chunk_reset"] = True
-            st.session_state["book_chunk_ack"] = -1
+            st.session_state[prefix + "reset"] = True
+            st.session_state[prefix + "ack"] = -1
 
 
 def build_book_pages(text):
@@ -3039,7 +3049,8 @@ elif page == "⚙️ 典藏后台管理系统":
         with tab_books:
             st.subheader("📚 图书批量导入")
             st.caption("支持 PDF、DOC、DOCX、WPS、TXT、MD、RTF；书名取文件名（不含扩展名）。")
-            render_chunk_book_uploader()
+            render_chunk_book_uploader("batch")
+            render_chunk_book_uploader("single")
 
             st.markdown("### 现有图书")
             conn = get_connection()
