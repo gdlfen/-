@@ -36,6 +36,7 @@ st.markdown("""
     mark.yellow-highlight { background-color: #FFF2CC; color: #B83B00; font-weight: bold; padding: 0 4px; border-radius: 2px; border-bottom: 2px solid #F0B27A; }
     .book-reader { max-width: 920px; max-height: 74vh; overflow-y: auto; box-sizing: border-box; margin: 18px auto 18px; background: #FFFFFF; border: 1px solid #D8C7A8; border-radius: 12px; padding: 38px 48px; box-shadow: 0 8px 24px rgba(90,60,30,0.12); font-family: 'Noto Serif SC', 'SimSun', 'Songti SC', serif; line-height: 2.05; color: #0B0806; text-align: justify; }
     .book-reader p { color: #0B0806 !important; font-weight: 500; text-indent: 2em; margin: 0 0 0.9em; }
+    #tcm-reader-content { touch-action: pan-y; }
     @keyframes pageFade { from { transform: translateX(8px); } to { transform: none; } }
     .page-fade { animation: pageFade 0.18s ease-out; }
     #tcm-reader-content:fullscreen { width:100vw; height:100vh; max-width:none; max-height:none; border:0; border-radius:0; padding:4vh 6vw; background:#FFFFFF; overflow:auto; }
@@ -56,7 +57,7 @@ VERIF_PAGE_SIZE = 20  # 各种验方检索每页条数
 FORMULA_PAGE_SIZE = 20  # 传世名方基础检索每页条数
 BOOK_PAGE_CHARS = 1200  # 图书文本阅读每页字符数
 MAX_BOOK_UPLOAD_MB = 900  # 单个图书文件上限（.streamlit/config.toml 设置为 1024MB）
-BACKUP_DOWNLOAD_CHUNK = 1024 * 1024  # 备份下载每片 1MB，兼容云端的 WebSocket 消息限制
+BACKUP_DOWNLOAD_CHUNK = 512 * 1024  # 备份下载每片 512KB，兼容云端较小的 WebSocket 消息上限
 BOOK_BACKUP_FILE = os.environ.get(
     "TCM_BOOK_BACKUP_FILE",
     os.path.join(os.path.dirname(os.path.abspath(DB_FILE)), "book_library_backup.db"))
@@ -1253,7 +1254,7 @@ READER_GESTURE_JS = r"""
       var dx = e.changedTouches[0].clientX - sx;
       var dy = e.changedTouches[0].clientY - sy;
       var horizontal = Math.abs(dx) > 140 && Math.abs(dx) > Math.abs(dy) * 1.5;
-      if (horizontal && ((dx < 0 && startAtRight) || (dx > 0 && startAtLeft))) {
+      if (horizontal) {
         turn(dx < 0 ? "next" : "prev");
       }
       active = null;
@@ -1275,7 +1276,7 @@ READER_GESTURE_JS = r"""
         turn("prev");
       }
     }
-    doc.addEventListener("touchstart", onTouchStart, { passive: true });
+    doc.addEventListener("touchstart", onTouchStart, { passive: false });
     doc.addEventListener("touchmove", onTouchMove, { passive: false });
     doc.addEventListener("touchend", onTouchEnd, { passive: false });
     doc.addEventListener("wheel", onWheel, { passive: false });
@@ -1376,6 +1377,7 @@ READER_GESTURE_JS_V2 = r"""
       if (e.touches && e.touches.length === 2) {
         var el = readerOf(e.target);
         if (!el) return;
+        e.preventDefault();
         pinchTarget = el;
         pinching = true;
         active = null;
@@ -1400,7 +1402,8 @@ READER_GESTURE_JS_V2 = r"""
         var dy = e.touches[0].clientY - e.touches[1].clientY;
         var distance = Math.sqrt(dx * dx + dy * dy);
         if (pinchStart > 0 && pinchTarget) {
-          applyZoom(pinchTarget, pinchBase * distance / pinchStart);
+          var pinchRatio = pinchStart > 0 ? distance / pinchStart : 1;
+          applyZoom(pinchTarget, pinchBase * Math.pow(pinchRatio, 1.25));
           e.preventDefault();
         }
         return;
@@ -1427,7 +1430,7 @@ READER_GESTURE_JS_V2 = r"""
       var dx = e.changedTouches[0].clientX - sx;
       var dy = e.changedTouches[0].clientY - sy;
       var horizontal = Math.abs(dx) > 140 && Math.abs(dx) > Math.abs(dy) * 1.5;
-      if (horizontal && ((dx < 0 && startAtRight) || (dx > 0 && startAtLeft))) {
+      if (horizontal) {
         turn(dx < 0 ? "next" : "prev");
       }
       active = null;
@@ -1614,7 +1617,7 @@ READER_GESTURE_JS_V2 = r"""
     if (fsBtn) {
       fsBtn.addEventListener("click", toggleOverlay);
     }
-    doc.addEventListener("touchstart", onTouchStart, { passive: true });
+    doc.addEventListener("touchstart", onTouchStart, { passive: false });
     doc.addEventListener("touchmove", onTouchMove, { passive: false });
     doc.addEventListener("touchend", onTouchEnd, { passive: false });
     doc.addEventListener("wheel", onWheel, { passive: false });

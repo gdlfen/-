@@ -28,6 +28,7 @@
   var chunks = [];
   var lastStart = 0;
   var waitTimer = null;
+  var ackTimer = null;
 
   function send(value) {
     window.parent.postMessage({
@@ -45,7 +46,9 @@
   }
   function reset() {
     if (waitTimer) clearTimeout(waitTimer);
+    if (ackTimer) clearTimeout(ackTimer);
     waitTimer = null;
+    ackTimer = null;
     active = false;
     index = -1;
     total = 0;
@@ -56,6 +59,10 @@
     statusEl.textContent = "";
   }
   function finishDownload() {
+    if (ackTimer) clearTimeout(ackTimer);
+    if (waitTimer) clearTimeout(waitTimer);
+    ackTimer = null;
+    waitTimer = null;
     var blob = new Blob(chunks, { type: "application/octet-stream" });
     var url = URL.createObjectURL(blob);
     var targetDoc = document;
@@ -74,6 +81,18 @@
     btn.disabled = false;
     btn.textContent = "⬇️ 再次下载图书库备份";
     send({ action: "done", id: uploadId });
+  }
+  function requestNext(attempt) {
+    if (index >= total - 1) return;
+    send({ action: "ack", id: uploadId, index: index });
+    if (ackTimer) clearTimeout(ackTimer);
+    if (attempt < 8) {
+      ackTimer = setTimeout(function () { requestNext(attempt + 1); }, 800);
+    } else {
+      active = false;
+      btn.disabled = false;
+      statusEl.textContent = "接收中断，请重新点击下载。";
+    }
   }
   btn.addEventListener("click", function () {
     if (active) return;
@@ -115,10 +134,14 @@
     chunks.push(b64ToBytes(args.chunk));
     var pct = total ? Math.min(100, Math.round((index + 1) * 100 / total)) : 0;
     statusEl.textContent = "正在接收备份：" + pct + "%";
+    if (ackTimer) {
+      clearTimeout(ackTimer);
+      ackTimer = null;
+    }
     if (index >= total - 1) {
       finishDownload();
     } else {
-      send({ action: "ack", id: uploadId, index: index });
+      requestNext(0);
     }
   });
   window.parent.postMessage({
