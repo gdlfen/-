@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Backup Download</title>
+  <style>
+    html, body { margin:0; padding:0; background:transparent; font-family:'Noto Sans SC','Microsoft YaHei',sans-serif; }
+    #dlBtn { padding:8px 14px; border:1px solid #792D11; border-radius:6px;
+      background:#792D11; color:#FFFFFF; font-size:14px; font-weight:bold; cursor:pointer; }
+    #dlBtn:disabled { opacity:0.55; cursor:default; }
+    #status { margin-top:5px; color:#5A4A3A; font-size:12px; min-height:16px; }
+  </style>
+</head>
+<body>
+<button id="dlBtn" type="button">⬇️ 下载图书库备份（.db）</button>
+<div id="status"></div>
+<script>
+(function () {
+  "use strict";
+  var btn = document.getElementById("dlBtn");
+  var statusEl = document.getElementById("status");
+  var active = false;
+  var index = -1;
+  var total = 0;
+  var filename = "book_library_backup.db";
+  var uploadId = null;
+  var chunks = [];
+  var lastStart = 0;
+  var waitTimer = null;
+  var ackTimer = null;
+  var ready = false;
+  var saveLink = null;
+  var saveUrl = null;
+
+  function send(value) {
+    window.parent.postMessage({
+      isStreamlitMessage: true,
+      type: "streamlit:setComponentValue",
+      value: value,
+      dataType: "json"
+    }, "*");
+  }
+  function b64ToBytes(b64) {
+    var binary = atob(b64 || "");
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+  function reset() {
+    if (waitTimer) clearTimeout(waitTimer);
+    if (ackTimer) clearTimeout(ackTimer);
+    waitTimer = null;
+    ackTimer = null;
+    if (saveLink && saveLink.parentNode) saveLink.parentNode.removeChild(saveLink);
+    saveLink = null;
+    if (saveUrl) URL.revokeObjectURL(saveUrl);
+    saveUrl = null;
+    active = false;
+    ready = false;
+    index = -1;
+    total = 0;
+    chunks = [];
+    uploadId = null;
+    btn.disabled = false;
+    btn.textContent = "⬇️ 下载图书库备份（.db）";
+    statusEl.textContent = "";
+  }
+  function prepareDownload() {
+    if (ackTimer) clearTimeout(ackTimer);
+    if (waitTimer) clearTimeout(waitTimer);
+    ackTimer = null;
+    waitTimer = null;
+    active = false;
+    ready = true;
+    if (saveLink && saveLink.parentNode) saveLink.parentNode.removeChild(saveLink);
+    if (saveUrl) URL.revokeObjectURL(saveUrl);
+    var blob = new Blob(chunks, { type: "application/octet-stream" });
+    saveUrl = URL.createObjectURL(blob);
+    var targetDoc = document;
+    try {
+      if (window.parent && window.parent.document) targetDoc = window.parent.document;
+    } catch (e) {}
+    saveLink = targetDoc.createElement("a");
+    saveLink.id = "tcm-backup-save-link";
+    saveLink.href = saveUrl;
+    saveLink.download = filename || "book_library_backup.db";
+    saveLink.textContent = "💾 点击保存图书库备份（.db）";
+    saveLink.style.cssText = "position:fixed;top:18px;left:50%;transform:translateX(-50%);" +
+      "z-index:2147483647;display:inline-block;padding:10px 18px;background:#1F7A3D;" +
+      "color:#FFFFFF;border:1px solid #145A2C;border-radius:8px;font-size:15px;" +
+      "font-weight:bold;text-decoration:none;box-shadow:0 4px 16px rgba(0,0,0,0.25);";
+    saveLink.addEventListener("click", function () {
+      setTimeout(function () {
+        send({ action: "done", id: uploadId });
+        reset();
+      }, 1500);
+    });
+    targetDoc.body.appendChild(saveLink);
+    btn.disabled = true;
+    btn.textContent = "✅ 备份已接收";
+    statusEl.textContent = "请点击页面顶部的“💾 点击保存图书库备份”链接。";
+  }
+  function requestNext(attempt) {
+    if (index >= total - 1) return;
+    send({ action: "ack", id: uploadId, index: index });
+    if (ackTimer) clearTimeout(ackTimer);
+    if (attempt < 8) {
+      ackTimer = setTimeout(function () { requestNext(attempt + 1); }, 800);
+    } else {
+      active = false;
+      btn.disabled = false;
+      statusEl.textContent = "接收中断，请重新点击下载。";
+    }
+  }
+  btn.addEventListener("click", function () {
+    if (ready) return;
+    if (active) return;
+    chunks = [];
+    ready = false;
+    index = -1;
+    total = 0;
+    uploadId = String(Date.now()) + "-" + Math.random().toString(36).slice(2, 10);
+    lastStart = Date.now();
+    btn.disabled = true;
+    statusEl.textContent = "正在准备备份分片…";
+    if (waitTimer) clearTimeout(waitTimer);
+    waitTimer = setTimeout(function () {
+      if (index < 0) {
+        active = false;
+        btn.disabled = false;
+        statusEl.textContent = "服务器未返回备份分片，请重试；如果反复失败请查看日志。";
+      }
+    }, 20000);
+    send({ action: "start", id: uploadId, at: lastStart });
+  });
+  window.addEventListener("message", function (event) {
+    if (!event.data || event.data.type !== "streamlit:render") return;
+    var args = event.data.args || {};
+    if (args.reset) {
+      reset();
+      return;
+    }
+    if (!args.active || !args.chunk) return;
+    if (args.id !== uploadId) return;
+    if (waitTimer) {
+      clearTimeout(waitTimer);
+      waitTimer = null;
+    }
+    var incoming = Number(args.index);
+    if (incoming !== index + 1) return;
+    index = incoming;
+    total = Number(args.total) || 0;
+    filename = args.filename || filename;
+    chunks.push(b64ToBytes(args.chunk));
+    var pct = total ? Math.min(100, Math.round((index + 1) * 100 / total)) : 0;
+    statusEl.textContent = "正在接收备份：" + (index + 1) + "/" + total + "（" + pct + "%）";
+    if (ackTimer) {
+      clearTimeout(ackTimer);
+      ackTimer = null;
+    }
+    if (index >= total - 1) {
+      prepareDownload();
+    } else {
+      requestNext(0);
+    }
+  });
+  window.parent.postMessage({
+    isStreamlitMessage: true,
+    type: "streamlit:componentReady",
+    apiVersion: 1
+  }, "*");
+  window.parent.postMessage({
+    isStreamlitMessage: true,
+    type: "streamlit:setFrameHeight",
+    height: 62
+  }, "*");
+})();
+</script>
+</body>
+</html>
