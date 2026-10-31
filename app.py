@@ -3029,7 +3029,7 @@ elif page == "⚙️ 典藏后台管理系统":
 
             st.markdown("### 📦 超大文件 / 批量 ZIP 分片上传")
             st.caption(
-                "浏览器按 4MB 分片发送，绕过单次上传限制；"
+                "浏览器按 1MB 分片发送，绕过单次上传限制；"
                 f"支持单本图书或包含多本图书的 ZIP，单文件上限 {MAX_BOOK_UPLOAD_MB}MB。")
             chunk_notice = st.session_state.pop("book_chunk_notice", None)
             if chunk_notice:
