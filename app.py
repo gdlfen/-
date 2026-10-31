@@ -814,6 +814,49 @@ def upsert_book_from_path(conn, category, title, fmt, filename, path, page_count
     return book_id, is_new
 
 
+def import_books_from_zip(source, category, progress_callback=None):
+    """批量读取 ZIP 中的图书文件并导入，返回成功数和警告。"""
+    success_count = 0
+    warnings = []
+    with zipfile.ZipFile(source, "r") as archive:
+        infos = [
+            info for info in archive.infolist()
+            if not info.is_dir()
+            and not info.filename.startswith("__MACOSX/")
+            and os.path.splitext(info.filename)[1].lower().lstrip(".")
+            in BOOK_FILE_TYPES
+        ]
+        total = len(infos)
+        if not total:
+            return 0, ["压缩包中没有支持格式的图书文件（pdf/doc/docx/wps/txt/md/rtf）。"]
+        conn = get_connection()
+        try:
+            for i, info in enumerate(infos, start=1):
+                filename = os.path.basename(info.filename)
+                if info.file_size > MAX_BOOK_UPLOAD_MB * 1024 * 1024:
+                    warnings.append(f"{filename}：超过 {MAX_BOOK_UPLOAD_MB}MB")
+                    continue
+                try:
+                    data = archive.read(info)
+                    fmt = os.path.splitext(filename)[1].lower().lstrip(".")
+                    title = os.path.splitext(filename)[0].strip() or "未命名图书"
+                    text, page_count, error = extract_book_content(data, filename)
+                    upsert_book(
+                        conn, category, title, fmt, filename,
+                        data, text, page_count)
+                    conn.commit()
+                    success_count += 1
+                    if error:
+                        warnings.append(f"{filename}：{error}")
+                except Exception as e:
+                    warnings.append(f"{filename}：导入失败 {e}")
+                if progress_callback:
+                    progress_callback(i, total, filename)
+        finally:
+            conn.close()
+    return success_count, warnings
+
+
 @st.cache_data(show_spinner=False)
 def load_books(category):
     conn = get_connection()
@@ -2902,6 +2945,33 @@ elif page == "⚙️ 典藏后台管理系统":
             st.caption("支持 PDF、DOC、DOCX、WPS、TXT、MD、RTF；书名取文件名（不含扩展名）。")
             book_category = st.selectbox(
                 "图书分类", BOOK_CATEGORIES, key="book_import_category")
+            st.markdown("### 📚 批量导入（ZIP 压缩包）")
+            st.caption(
+                "把多本 PDF/DOC/DOCX/WPS/TXT/MD/RTF 放进一个 ZIP，"
+                "上传后一次全部导入；分类使用上面选择的分类。")
+            batch_zip = st.file_uploader(
+                "选择包含多本图书的 ZIP 压缩包",
+                type=["zip"],
+                accept_multiple_files=False,
+                key="book_batch_zip")
+            if st.button("开始批量导入 ZIP", type="primary", key="book_batch_run"):
+                if not batch_zip:
+                    st.warning("请先选择 ZIP 压缩包。")
+                else:
+                    progress = st.progress(0.0, text="正在读取压缩包...")
+                    def _zip_progress(i, total, filename):
+                        progress.progress(
+                            i / total, text=f"已处理 {i}/{total}：{filename}")
+                    success_count, warnings = import_books_from_zip(
+                        io.BytesIO(batch_zip.getvalue()),
+                        book_category, _zip_progress)
+                    progress.progress(1.0, text="批量导入完成")
+                    clear_search_caches()
+                    st.success(f"✅ 批量导入完成，成功 {success_count} 本。")
+                    for message in warnings:
+                        st.warning(message)
+
+            st.markdown("### 📖 单本导入")
             uploaded_book = st.file_uploader(
                 "选择图书文件（一次一个）", type=BOOK_FILE_TYPES,
                 accept_multiple_files=False,
@@ -2957,10 +3027,10 @@ elif page == "⚙️ 典藏后台管理系统":
                     except Exception as e:
                         st.error(f"图书导入失败：{e}")
 
-            st.markdown("### 📦 超大文件分片上传（建议 >200MB）")
+            st.markdown("### 📦 超大文件 / 批量 ZIP 分片上传")
             st.caption(
-                "浏览器按 4MB 分片发送，绕过单次 200MB 上传限制；"
-                f"单文件上限 {MAX_BOOK_UPLOAD_MB}MB。")
+                "浏览器按 4MB 分片发送，绕过单次上传限制；"
+                f"支持单本图书或包含多本图书的 ZIP，单文件上限 {MAX_BOOK_UPLOAD_MB}MB。")
             chunk_notice = st.session_state.pop("book_chunk_notice", None)
             if chunk_notice:
                 st.success(chunk_notice)
@@ -2978,7 +3048,7 @@ elif page == "⚙️ 典藏后台管理系统":
                 chunk_event = chunk_comp(
                     ack=int(st.session_state.get("book_chunk_ack", -1)),
                     reset=bool(reset_flag),
-                    accept=",".join("." + ext for ext in BOOK_FILE_TYPES),
+                    accept=",".join("." + ext for ext in BOOK_FILE_TYPES + ["zip"]),
                     key="book_chunk_uploader")
                 if reset_flag:
                     chunk_event = None
@@ -2996,7 +3066,7 @@ elif page == "⚙️ 典藏后台管理系统":
                         if (not upload_id or index < 0 or total <= 0 or size <= 0
                                 or size > MAX_BOOK_UPLOAD_MB * 1024 * 1024):
                             raise ValueError("分片参数无效或文件超过上限")
-                        if fmt not in BOOK_FILE_TYPES:
+                        if fmt not in BOOK_FILE_TYPES and fmt != "zip":
                             raise ValueError("不支持的文件类型")
                         os.makedirs(BOOK_UPLOAD_DIR, exist_ok=True)
                         part_path = os.path.join(
@@ -3017,17 +3087,26 @@ elif page == "⚙️ 典藏后台管理系统":
                             if actual_size != size:
                                 raise ValueError(
                                     f"文件不完整：{actual_size}/{size} 字节")
-                            title = os.path.splitext(name)[0].strip() or "未命名图书"
-                            page_count = 0
-                            if fmt == "pdf":
-                                page_count = get_pdf_page_count_from_path(part_path)
-                            conn = get_connection()
-                            try:
-                                upsert_book_from_path(
-                                    conn, chunk_category, title, fmt, name,
-                                    part_path, page_count)
-                            finally:
-                                conn.close()
+                            if fmt == "zip":
+                                zip_success, zip_warnings = import_books_from_zip(
+                                    part_path, chunk_category)
+                                notice = (
+                                    f"✅ ZIP 批量导入完成：成功 {zip_success} 本。")
+                                if zip_warnings:
+                                    notice += " " + "；".join(zip_warnings[:3])
+                            else:
+                                title = os.path.splitext(name)[0].strip() or "未命名图书"
+                                page_count = 0
+                                if fmt == "pdf":
+                                    page_count = get_pdf_page_count_from_path(part_path)
+                                conn = get_connection()
+                                try:
+                                    upsert_book_from_path(
+                                        conn, chunk_category, title, fmt, name,
+                                        part_path, page_count)
+                                finally:
+                                    conn.close()
+                                notice = f"✅ 分片上传并导入完成：{name}"
                             try:
                                 os.remove(part_path)
                             except Exception:
@@ -3036,8 +3115,7 @@ elif page == "⚙️ 典藏后台管理系统":
                             st.session_state["book_chunk_done"] = True
                             st.session_state["book_chunk_reset"] = True
                             st.session_state["book_chunk_ack"] = -1
-                            st.session_state["book_chunk_notice"] = (
-                                f"✅ 分片上传并导入完成：{name}")
+                            st.session_state["book_chunk_notice"] = notice
                             st.rerun()
                         elif is_new:
                             st.rerun()

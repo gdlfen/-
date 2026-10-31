@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -16,7 +16,7 @@
 <body>
 <div class="wrap">
   <input id="file" type="file">
-  <div id="status">选择大于 200MB 的图书文件，将自动分片上传。</div>
+  <div id="status">选择图书文件或 ZIP 压缩包，将自动分片上传。</div>
   <div id="progress"><div id="bar"></div></div>
 </div>
 <script>
@@ -109,7 +109,7 @@
       ackIndex = -1;
       fileInput.value = "";
       barEl.style.width = "0";
-      statusEl.textContent = "选择大于 200MB 的图书文件，将自动分片上传。";
+      statusEl.textContent = "选择图书文件或 ZIP 压缩包，将自动分片上传。";
       return;
     }
     if (typeof args.ack === "number") {
@@ -133,3 +133,4 @@
 </script>
 </body>
 </html>
+
