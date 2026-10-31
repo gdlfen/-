@@ -1038,19 +1038,19 @@ def is_valid_book_backup(path):
 
 
 def sync_book_backup_static():
-    """把有效备份放入已存在的 static 目录；优先硬链接。"""
+    """把当前主数据库硬链接到 static，避免再复制/重建 60MB 图书库。"""
     try:
-        if not is_valid_book_backup(BOOK_BACKUP_FILE):
+        if not is_valid_book_backup(DB_FILE):
             return False
         os.makedirs(STATIC_DIR, exist_ok=True)
         try:
             if os.path.exists(BOOK_BACKUP_STATIC):
                 os.remove(BOOK_BACKUP_STATIC)
-            os.link(BOOK_BACKUP_FILE, BOOK_BACKUP_STATIC)
+            os.link(DB_FILE, BOOK_BACKUP_STATIC)
             return True
         except OSError:
             temp_path = BOOK_BACKUP_STATIC + ".tmp"
-            shutil.copyfile(BOOK_BACKUP_FILE, temp_path)
+            shutil.copyfile(DB_FILE, temp_path)
             os.replace(temp_path, BOOK_BACKUP_STATIC)
             return True
     except Exception:
@@ -1137,15 +1137,12 @@ def bootstrap_book_library():
                     b.close()
             except Exception:
                 backup_count = 0
-        if main_count and not backup_count:
-            if not st.session_state.get("_book_backup_tried"):
-                st.session_state["_book_backup_tried"] = True
-                backup_book_library()
-        elif not main_count and backup_count:
-            restore_book_library_from_backup()
-        elif main_count and backup_count:
+        if main_count:
             if not st.session_state.get("_book_static_synced"):
                 st.session_state["_book_static_synced"] = True
+                sync_book_backup_static()
+        elif backup_count:
+            if restore_book_library_from_backup():
                 sync_book_backup_static()
     except Exception:
         pass
@@ -2947,7 +2944,7 @@ elif page == "⚙️ 典藏后台管理系统":
                         except Exception:
                             pass
                         try:
-                            backup_book_library()
+                            sync_book_backup_static()
                         except Exception:
                             pass
                         st.success(f"✅ 图书导入完成，共处理 {success_count} 个文件。")
@@ -3032,7 +3029,7 @@ elif page == "⚙️ 典藏后台管理系统":
                             except Exception:
                                 pass
                             clear_search_caches()
-                            backup_book_library()
+                            sync_book_backup_static()
                             st.session_state["book_chunk_done"] = True
                             st.session_state["book_chunk_reset"] = True
                             st.session_state["book_chunk_ack"] = -1
@@ -3080,7 +3077,7 @@ elif page == "⚙️ 典藏后台管理系统":
                     finally:
                         conn.close()
                     clear_search_caches()
-                    backup_book_library()
+                    sync_book_backup_static()
                     if deleted:
                         st.success("图书已删除。")
                         st.rerun()
@@ -3090,20 +3087,16 @@ elif page == "⚙️ 典藏后台管理系统":
             st.caption("旧版 DOC/WPS 二进制文件若无法提取文字，暂不支持在线阅读。")
             st.markdown("### 📦 图书库备份与恢复")
             st.caption(
-                "图书库会自动备份为 book_library_backup.db；主数据库被部署包覆盖后，"
-                "启动时会自动从该备份恢复。若整个运行目录被清空，请先下载备份文件保存。")
+                "点击生成后，会把当前完整数据库同步到可下载的备份文件；"
+                "该备份包含图书库和现有业务数据。")
             if st.button("📦 生成 / 更新图书库备份", key="book_backup_generate"):
-                backup_ok = backup_book_library()
-                if backup_ok and is_valid_book_backup(BOOK_BACKUP_FILE):
+                backup_ok = sync_book_backup_static()
+                if backup_ok and is_valid_book_backup(BOOK_BACKUP_STATIC):
                     st.success("✅ 备份已生成，可点击下方链接下载。")
-                elif backup_ok:
-                    st.warning("备份文件写入后校验失败，请重试。")
+                elif not is_valid_book_backup(DB_FILE):
+                    st.error("当前主数据库中没有可备份的图书。")
                 else:
-                    backup_err = st.session_state.pop("book_backup_error", "")
-                    detail = f" 原因：{backup_err}" if backup_err else ""
-                    st.error(
-                        "备份失败：主库中没有可读取的图书，或备份文件无法写入。"
-                        f"请确认图书库中有图书，并查看服务器磁盘空间/权限。{detail}")
+                    st.error("备份文件写入失败，请检查服务器磁盘空间和权限。")
             if is_valid_book_backup(BOOK_BACKUP_STATIC):
                 static_version = os.stat(BOOK_BACKUP_STATIC).st_mtime_ns
                 st.markdown(
