@@ -2902,10 +2902,11 @@ elif page == "⚙️ 典藏后台管理系统":
             st.caption("支持 PDF、DOC、DOCX、WPS、TXT、MD、RTF；书名取文件名（不含扩展名）。")
             book_category = st.selectbox(
                 "图书分类", BOOK_CATEGORIES, key="book_import_category")
-            uploaded_books = st.file_uploader(
-                "选择图书文件（可多选）", type=BOOK_FILE_TYPES,
-                accept_multiple_files=True,
+            uploaded_book = st.file_uploader(
+                "选择图书文件（一次一个）", type=BOOK_FILE_TYPES,
+                accept_multiple_files=False,
                 key="book_import_files")
+            uploaded_books = [uploaded_book] if uploaded_book else []
             if uploaded_books:
                 st.caption("已选择：" + "、".join(f.name for f in uploaded_books))
             st.caption(f"单个文件上限约 {MAX_BOOK_UPLOAD_MB}MB；超过 200MB 的 PDF 会按扫描版处理。")
