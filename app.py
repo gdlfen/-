@@ -1335,9 +1335,9 @@ READER_GESTURE_JS_V2 = r"""
     function atBottom(el) {
       return el.scrollHeight - el.scrollTop - el.clientHeight <= 8;
     }
-    function atLeft(el) { return el.scrollLeft <= 4; }
+    function atLeft(el) { return el.scrollLeft <= 32; }
     function atRight(el) {
-      return el.scrollWidth - el.scrollLeft - el.clientWidth <= 8;
+      return el.scrollWidth - el.scrollLeft - el.clientWidth <= 32;
     }
     function currentZoom(el) {
       if (el.classList.contains("book-reader")) {
