@@ -17,7 +17,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 # --- 全局与主题配置 (必须放在最顶部) ---
-st.set_page_config(page_title="中医典藏系统V2.0  田夫开发", page_icon="📜", layout="wide")
+st.set_page_config(page_title="中医典藏检索系统V2.0  田夫开发", page_icon="📜", layout="wide")
 
 # 注入自定义 CSS：庄重、古朴的中医古籍风格
 st.markdown("""
@@ -25,6 +25,12 @@ st.markdown("""
     .stApp { background-color: #FDFBF7; font-family: 'Noto Serif SC', 'SimSun', 'Songti SC', serif; color: #2C2825; }
     h1, h2, h3 { color: #792D11 !important; font-weight: bold; }
     [data-testid="stSidebar"] { background-color: #F2E8D5; border-right: 2px solid #D9C5A0; }
+    [data-testid="stSidebar"] div[role="radiogroup"] > div:nth-child(2) label p,
+    [data-testid="stSidebar"] div[role="radiogroup"] > div:nth-child(3) label p,
+    [data-testid="stSidebar"] div[role="radiogroup"] > div:nth-child(4) label p,
+    [data-testid="stSidebar"] div[role="radiogroup"] > div:nth-child(5) label p,
+    [data-testid="stSidebar"] div[role="radiogroup"] > div:nth-child(6) label p { font-size: 1.02rem !important; font-weight: 500; }
+    [data-testid="stSidebar"] div[role="radiogroup"] > div:nth-child(7) label p { font-size: 0.78rem !important; opacity: 0.9; }
     .stButton>button { background-color: #792D11; color: #FFFFFF; border-radius: 4px; border: 1px solid #4A1A08; transition: all 0.3s ease; font-weight: bold; }
     .stButton>button:hover { background-color: #4A1A08; color: #FDFBF7; border: 1px solid #792D11; }
     [data-testid="stVerticalBlockBorderWrapper"] { background-color: #FFFFFF; border: 1px solid #E8DCC4 !important; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-radius: 8px; }
@@ -555,6 +561,14 @@ def safe_text(value, default=""):
     return str(value).strip()
 
 
+def feature_title(text):
+    """功能页标题统一缩小一号。"""
+    st.markdown(
+        f"<h1 style='font-size:2rem; line-height:1.35; margin-bottom:0.35rem;'>"
+        f"{html.escape(str(text))}</h1>",
+        unsafe_allow_html=True)
+
+
 def strip_leading_number(text):
     """去掉字符串开头的层级编号，如 (一)、1.、一、、四)。"""
     s = str(text or "").strip()
@@ -934,16 +948,24 @@ CREATE TABLE IF NOT EXISTS reading_progress (
 
 
 def backup_book_library():
-    """用 SQL 直接复制图书表，避免把几百 MB BLOB 读入 Python 内存。"""
+    """在临时库中重建图书备份，避免损坏的旧备份或大 BLOB 读入内存。"""
+    temp_backup = BOOK_BACKUP_FILE + ".building"
     try:
         if not os.path.exists(DB_FILE):
-            return
+            return False
         backup_dir = os.path.dirname(os.path.abspath(BOOK_BACKUP_FILE))
         if backup_dir:
             os.makedirs(backup_dir, exist_ok=True)
+        try:
+            os.remove(temp_backup)
+        except OSError:
+            pass
         conn = sqlite3.connect(DB_FILE)
         try:
-            conn.execute("ATTACH DATABASE ? AS bk", (BOOK_BACKUP_FILE,))
+            book_count = conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+            if not book_count:
+                return False
+            conn.execute("ATTACH DATABASE ? AS bk", (temp_backup,))
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS bk.books (
                   id INTEGER PRIMARY KEY, category TEXT NOT NULL, title TEXT NOT NULL,
@@ -972,21 +994,60 @@ def backup_book_library():
             conn.execute("DETACH DATABASE bk")
         finally:
             conn.close()
+        check = sqlite3.connect(temp_backup)
+        try:
+            copied = check.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+        finally:
+            check.close()
+        if not copied:
+            raise ValueError("备份中没有图书数据")
+        os.replace(temp_backup, BOOK_BACKUP_FILE)
         sync_book_backup_static()
+        return True
+    except Exception as e:
+        try:
+            st.session_state["book_backup_error"] = str(e)
+        except Exception:
+            pass
+        try:
+            os.remove(temp_backup)
+        except OSError:
+            pass
+        return False
+
+
+def is_valid_book_backup(path):
+    try:
+        if not os.path.exists(path):
+            return False
+        with open(path, "rb") as f:
+            if f.read(16) != b"SQLite format 3\x00":
+                return False
+        conn = sqlite3.connect(path)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM books").fetchone()[0] > 0
+        finally:
+            conn.close()
     except Exception:
-        pass
+        return False
 
 
 def sync_book_backup_static():
-    """把备份复制到 Streamlit 静态目录，供浏览器直接下载大文件。"""
+    """把有效备份放入 Streamlit 静态目录；优先硬链接，避免复制几十 MB。"""
     try:
-        if not os.path.exists(BOOK_BACKUP_FILE):
+        if not is_valid_book_backup(BOOK_BACKUP_FILE):
             return False
         os.makedirs(STATIC_DIR, exist_ok=True)
-        temp_path = BOOK_BACKUP_STATIC + ".tmp"
-        shutil.copyfile(BOOK_BACKUP_FILE, temp_path)
-        os.replace(temp_path, BOOK_BACKUP_STATIC)
-        return True
+        try:
+            if os.path.exists(BOOK_BACKUP_STATIC):
+                os.remove(BOOK_BACKUP_STATIC)
+            os.link(BOOK_BACKUP_FILE, BOOK_BACKUP_STATIC)
+            return True
+        except OSError:
+            temp_path = BOOK_BACKUP_STATIC + ".tmp"
+            shutil.copyfile(BOOK_BACKUP_FILE, temp_path)
+            os.replace(temp_path, BOOK_BACKUP_STATIC)
+            return True
     except Exception:
         return False
 
@@ -1072,7 +1133,9 @@ def bootstrap_book_library():
             except Exception:
                 backup_count = 0
         if main_count and not backup_count:
-            backup_book_library()
+            if not st.session_state.get("_book_backup_tried"):
+                st.session_state["_book_backup_tried"] = True
+                backup_book_library()
         elif not main_count and backup_count:
             restore_book_library_from_backup()
     except Exception:
@@ -1199,10 +1262,6 @@ READER_GESTURE_JS = r"""
       var horizontal = Math.abs(dx) > 140 && Math.abs(dx) > Math.abs(dy) * 1.5;
       if (horizontal && ((dx < 0 && startAtRight) || (dx > 0 && startAtLeft))) {
         turn(dx < 0 ? "next" : "prev");
-      } else if (dy < -140 && startAtBottom) {
-        turn("next");
-      } else if (dy > 140 && startAtTop) {
-        turn("prev");
       }
       active = null;
       startAtTop = startAtBottom = startAtLeft = startAtRight = false;
@@ -1377,10 +1436,6 @@ READER_GESTURE_JS_V2 = r"""
       var horizontal = Math.abs(dx) > 140 && Math.abs(dx) > Math.abs(dy) * 1.5;
       if (horizontal && ((dx < 0 && startAtRight) || (dx > 0 && startAtLeft))) {
         turn(dx < 0 ? "next" : "prev");
-      } else if (dy < -140 && startAtBottom) {
-        turn("next");
-      } else if (dy > 140 && startAtTop) {
-        turn("prev");
       }
       active = null;
       startAtTop = startAtBottom = startAtLeft = startAtRight = false;
@@ -1396,7 +1451,6 @@ READER_GESTURE_JS_V2 = r"""
       var now = Date.now();
       if (now - lastWheelTime > 350) {
         accX = 0;
-        accY = 0;
       }
       lastWheelTime = now;
       if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 3) {
@@ -1415,25 +1469,8 @@ READER_GESTURE_JS_V2 = r"""
         } else {
           accX = 0;
         }
-        return;
-      }
-      accX = 0;
-      if (e.deltaY > 0 && atBottom(el)) {
-        accY += e.deltaY;
-        e.preventDefault();
-        if (accY > 160) {
-          turn("next");
-          accY = 0;
-        }
-      } else if (e.deltaY < 0 && atTop(el)) {
-        accY += e.deltaY;
-        e.preventDefault();
-        if (accY < -160) {
-          turn("prev");
-          accY = 0;
-        }
       } else {
-        accY = 0;
+        accX = 0;
       }
     }
     function exitOverlay(el) {
@@ -1654,10 +1691,11 @@ bootstrap_book_library()
 # --- 2. 侧边栏与路由 ---
 st.sidebar.markdown("<h1 style='text-align: center; font-size: 60px;'>☯️</h1>", unsafe_allow_html=True)
 st.sidebar.markdown(
-    "<h1 style='font-size:1.55rem; line-height:1.35;'>📜 中医典藏系统V2.0</h1>"
+    "<h1 style='font-size:1.55rem; line-height:1.35;'>📜 中医典藏检索系统V2.0</h1>"
     "<div style='font-size:12px; font-weight:400; color:#6B5A4A; margin-top:-8px;'>田夫开发</div>",
     unsafe_allow_html=True)
 page = st.sidebar.radio("模块导航", [
+    "🏠 系统总览",
     "🔍 传世名方基础检索",
     "🤖 传世名方 AI 检索",
     "📚 图书阅读",
@@ -1674,10 +1712,34 @@ st.sidebar.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
+# 系统总览
+# ==========================================
+if page == "🏠 系统总览":
+    st.title("🏥 中医典藏检索系统")
+    st.markdown(
+        "## 欢迎使用《中医典藏检索系统》！\n\n"
+        "该系统功能有：**传世名方基础检索、传世名方 AI 检索、图书阅读、"
+        "各种验方检索、四季养生食谱检索**。")
+    st.info("请点开左侧“模块导航”，选择您需要的功能选项。")
+    st.markdown(
+        """
+        <div style="margin-top:24px; padding:20px 24px; border:1px solid #D8C7A8;
+        border-radius:10px; background:#FFFDF8; color:#3A2A1E; line-height:2;">
+        <b>使用提示</b><br>
+        · 传世名方基础检索：按临床病名查方剂；<br>
+        · 传世名方 AI 检索：用自然语言描述症状或需求；<br>
+        · 图书阅读：按分类选书，支持全屏、双指缩放和滑动翻页；<br>
+        · 各种验方检索：输入或选择疾病名称；<br>
+        · 四季养生食谱检索：按食材、功效、季节、菜式组合查询。
+        </div>
+        """,
+        unsafe_allow_html=True)
+
+# ==========================================
 # 模块一：传世名方基础检索
 # ==========================================
-if page == "🔍 传世名方基础检索":
-    st.title("🔍 传世名方基础检索")
+elif page == "🔍 传世名方基础检索":
+    feature_title("🔍 传世名方基础检索")
     st.markdown("仅在数据表的 **【临床病名】** 列中检索。可输入疾病名称，也可从菜单选择疾病名称。")
 
     search_mode = st.radio(
@@ -1808,7 +1870,7 @@ if page == "🔍 传世名方基础检索":
 # 模块二：传世名方 AI 智能检索
 # ==========================================
 elif page == "🤖 传世名方 AI 检索":
-    st.title("🤖 AI 智能检索")
+    feature_title("🤖 传世名方 AI 检索")
     st.markdown(
         "基于大模型的深度语义解析。**声明：AI 严格限定于本地《传世名方》数据库内进行比对筛查，宁缺毋滥，拒绝凭空伪造。**")
 
@@ -1996,7 +2058,7 @@ elif page == "🤖 传世名方 AI 检索":
 # 模块三：图书阅读
 # ==========================================
 elif page == "📚 图书阅读":
-    st.title("📚 图书阅读")
+    feature_title("📚 图书阅读")
     st.markdown("按分类选择书名阅读。阅读位置会自动记忆，下次打开同一本书会回到上次位置。")
 
     reader_category = st.selectbox("图书分类", BOOK_CATEGORIES, key="reader_category")
@@ -2015,6 +2077,10 @@ elif page == "📚 图书阅读":
             st.stop()
         book_row = books[books["title"] == selected_title].iloc[0]
         book_id = int(book_row["id"])
+        log_key = f"reader_logged_{book_id}"
+        if not st.session_state.get(log_key):
+            log_query("图书阅读", f"{reader_category}|{selected_title}")
+            st.session_state[log_key] = True
         book = load_book_text(book_id)
 
         if not book:
@@ -2025,7 +2091,7 @@ elif page == "📚 图书阅读":
             st.caption(
                 f"{reader_category} · {safe_text(fmt).upper()} · "
                 f"{format_file_size(file_size)} · {int(char_count or 0)} 字")
-            st.caption("页面区域支持左右滑动/滚轮翻页、双指开合缩放；右上角可全屏。")
+            st.caption("左右滑动/横向滚轮翻页；上下滚动阅读；双指开合缩放；右上角可全屏。")
             st.iframe(READER_GESTURE_JS_V2, height=38)
             text = text or ""
 
@@ -2073,7 +2139,7 @@ elif page == "📚 图书阅读":
                 if content:
                     total_pages = int(page_count or 0) or get_pdf_page_count(content)
                     if total_pages <= 0:
-                        st.warning("无法读取 PDF 页数，可下载原文件阅读。")
+                        st.warning("无法读取 PDF 页数，暂时无法在网页中打开。")
                     else:
                         page = max(1, min(get_reading_position(book_id) + 1, total_pages))
                         st.info(
@@ -2097,7 +2163,7 @@ elif page == "📚 图书阅读":
                                 unsafe_allow_html=True)
                             st.caption(f"当前缩放：{zoom_percent}%")
                         else:
-                            st.warning("PDF 页面渲染失败，可下载原文件阅读。")
+                            st.warning("PDF 页面渲染失败，暂时无法在网页中显示。")
 
                         page_slider_key = f"pdf_page_slider_{book_id}"
                         force_key = f"pdf_force_page_{book_id}"
@@ -2129,26 +2195,19 @@ elif page == "📚 图书阅读":
                                 save_reading_position(book_id, page)
                                 st.session_state[force_key] = True
                                 st.rerun()
-                    download_name = safe_text(book_row.get("filename")) or f"{title}.pdf"
-                    render_protected_download(
-                        book_id, download_name, content, "application/pdf")
+                    st.caption("原文件下载已关闭，仅提供在线阅读。")
                 else:
                     st.warning("未找到 PDF 原文件。")
             else:
                 st.warning(
-                    "该文件未能提取出可阅读文字，可能是扫描版或旧版 DOC/WPS 格式。"
-                    "可以下载原文件阅读。")
-                content = load_book_file(book_id)
-                if content:
-                    download_name = safe_text(book_row.get("filename")) or f"{title}.{fmt}"
-                    render_protected_download(
-                        book_id, download_name, content, "application/octet-stream")
+                    "该文件未能提取出可阅读文字，可能是扫描版或旧版 DOC/WPS 格式，"
+                    "暂不支持在网页中阅读。")
 
 # ==========================================
 # 模块四：各种验方检索
 # ==========================================
 elif page == "🧾 各种验方检索":
-    st.title("🧾 各种验方检索")
+    feature_title("🧾 各种验方检索")
     st.markdown("在 **【各种验方表】** 中检索。表格字段：方名、方剂及用法、主治疾病、症状、案例、出处。支持输入疾病名称或症状，也支持从菜单中选择疾病名称（按主治疾病整理）。")
 
     conn = get_connection()
@@ -2294,7 +2353,7 @@ elif page == "🧾 各种验方检索":
 # 模块四：养生食谱检索
 # ==========================================
 elif page == "🍲 四季养生食谱检索":
-    st.title("🍲 养生食谱数据库")
+    feature_title("🍲 四季养生食谱检索")
     st.markdown("按食材用料、核心功效、适用季节、菜式品种四个维度检索。不填的条件默认不作限制。")
 
     with st.container(border=True):
@@ -2942,23 +3001,28 @@ elif page == "⚙️ 典藏后台管理系统":
                 "图书库会自动备份为 book_library_backup.db；主数据库被部署包覆盖后，"
                 "启动时会自动从该备份恢复。若整个运行目录被清空，请先下载备份文件保存。")
             if st.button("📦 生成 / 更新图书库备份", key="book_backup_generate"):
-                backup_book_library()
-                backup_count = 0
-                if os.path.exists(BOOK_BACKUP_FILE):
-                    try:
-                        check_conn = sqlite3.connect(BOOK_BACKUP_FILE)
-                        try:
-                            backup_count = check_conn.execute(
-                                "SELECT COUNT(*) FROM books").fetchone()[0]
-                        finally:
-                            check_conn.close()
-                    except Exception:
-                        backup_count = 0
-                if backup_count:
-                    st.success("✅ 备份已生成，可点击下方按钮下载。")
+                backup_ok = backup_book_library()
+                if backup_ok and is_valid_book_backup(BOOK_BACKUP_FILE):
+                    st.success("✅ 备份已生成，可点击下方链接下载。")
+                elif backup_ok:
+                    st.warning("备份文件写入后校验失败，请重试。")
                 else:
-                    st.warning("当前没有可备份的图书。")
-            if os.path.exists(BOOK_BACKUP_STATIC):
+                    backup_err = st.session_state.pop("book_backup_error", "")
+                    detail = f" 原因：{backup_err}" if backup_err else ""
+                    st.error(
+                        "备份失败：主库中没有可读取的图书，或备份文件无法写入。"
+                        f"请确认图书库中有图书，并查看服务器磁盘空间/权限。{detail}")
+            if is_valid_book_backup(BOOK_BACKUP_STATIC):
+                st.markdown(
+                    '<a href="/app/static/book_library_backup.db" download '
+                    'style="display:inline-block;padding:8px 14px;margin:4px 0;'
+                    'background:#792D11;color:#FFFFFF;border-radius:6px;'
+                    'text-decoration:none;font-weight:bold;">'
+                    '⬇️ 下载图书库备份（.db）</a>',
+                    unsafe_allow_html=True)
+                st.caption("备份文件较大，浏览器会直接下载，不经过应用上传通道。")
+            elif is_valid_book_backup(BOOK_BACKUP_FILE):
+                st.info("请先点击上方“生成 / 更新图书库备份”，生成静态下载文件。")
                 st.markdown(
                     '<a href="/app/static/book_library_backup.db" download '
                     'style="display:inline-block;padding:8px 14px;margin:4px 0;'
@@ -3035,29 +3099,6 @@ elif page == "⚙️ 典藏后台管理系统":
                     else:
                         st.error(f"密码修改失败：{error}")
             st.caption("如忘记密码，可在数据库中删除 system_config 表的 admin_password_salt、admin_password_hash 两行，系统会恢复默认密码 123。")
-
-            st.divider()
-            st.subheader("📥 下载原文件密码")
-            st.caption("阅读页下载图书原文件时需要此密码；默认 123，可在此修改。")
-            with st.form("change_download_pwd_form"):
-                current_dl_pwd = st.text_input("当前下载密码", type="password")
-                new_dl_pwd = st.text_input("新下载密码（至少 4 位）", type="password")
-                confirm_dl_pwd = st.text_input("确认新下载密码", type="password")
-                dl_change_submitted = st.form_submit_button("💾 保存下载密码", type="primary")
-            if dl_change_submitted:
-                if not verify_download_password(current_dl_pwd):
-                    st.error("当前下载密码不正确。")
-                elif len(new_dl_pwd) < 4:
-                    st.error("新下载密码至少 4 位。")
-                elif new_dl_pwd != confirm_dl_pwd:
-                    st.error("两次输入的新下载密码不一致。")
-                else:
-                    ok, error = set_download_password(new_dl_pwd)
-                    if ok:
-                        st.success("✅ 下载密码已修改。")
-                    else:
-                        st.error(f"下载密码修改失败：{error}")
-            st.caption("如忘记下载密码，可删除 system_config 表的 download_password_salt、download_password_hash 两行，恢复默认 123。")
 
         with tab_danger:
             st.subheader("☢️ 高危指令区")
