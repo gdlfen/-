@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import zipfile
 
@@ -57,12 +58,14 @@ VERIF_PAGE_SIZE = 20  # 各种验方检索每页条数
 FORMULA_PAGE_SIZE = 20  # 传世名方基础检索每页条数
 BOOK_PAGE_CHARS = 1200  # 图书文本阅读每页字符数
 MAX_BOOK_UPLOAD_MB = 900  # 单个图书文件上限（.streamlit/config.toml 设置为 1024MB）
-BACKUP_DOWNLOAD_CHUNK = 512 * 1024  # 备份下载每片 512KB，兼容云端较小的 WebSocket 消息上限
 BOOK_BACKUP_FILE = os.environ.get(
     "TCM_BOOK_BACKUP_FILE",
     os.path.join(os.path.dirname(os.path.abspath(DB_FILE)), "book_library_backup.db"))
 BOOK_UPLOAD_DIR = os.path.join(
     os.path.dirname(os.path.abspath(DB_FILE)), "book_upload_chunks")
+STATIC_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(DB_FILE)), "static")
+BOOK_BACKUP_STATIC = os.path.join(STATIC_DIR, "book_library_backup.db")
 
 BOOK_CATEGORIES = [
     "基础理论类",
@@ -488,8 +491,6 @@ def _get_ai_storage_component():
 
 CHUNK_UPLOAD_COMPONENT_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "chunk_upload_component")
-BACKUP_DOWNLOAD_COMPONENT_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "backup_download_component")
 
 
 @st.cache_resource
@@ -499,17 +500,6 @@ def _get_chunk_upload_component():
     try:
         return components.declare_component(
             "tcm_chunk_upload", path=CHUNK_UPLOAD_COMPONENT_DIR)
-    except Exception:
-        return None
-
-
-@st.cache_resource
-def _get_backup_download_component():
-    if not os.path.isdir(BACKUP_DOWNLOAD_COMPONENT_DIR):
-        return None
-    try:
-        return components.declare_component(
-            "tcm_backup_download", path=BACKUP_DOWNLOAD_COMPONENT_DIR)
     except Exception:
         return None
 
@@ -1017,6 +1007,7 @@ def backup_book_library():
         if not copied:
             raise ValueError("备份中没有图书数据")
         os.replace(temp_backup, BOOK_BACKUP_FILE)
+        sync_book_backup_static()
         return True
     except Exception as e:
         try:
@@ -1042,6 +1033,26 @@ def is_valid_book_backup(path):
             return conn.execute("SELECT COUNT(*) FROM books").fetchone()[0] > 0
         finally:
             conn.close()
+    except Exception:
+        return False
+
+
+def sync_book_backup_static():
+    """把有效备份放入已存在的 static 目录；优先硬链接。"""
+    try:
+        if not is_valid_book_backup(BOOK_BACKUP_FILE):
+            return False
+        os.makedirs(STATIC_DIR, exist_ok=True)
+        try:
+            if os.path.exists(BOOK_BACKUP_STATIC):
+                os.remove(BOOK_BACKUP_STATIC)
+            os.link(BOOK_BACKUP_FILE, BOOK_BACKUP_STATIC)
+            return True
+        except OSError:
+            temp_path = BOOK_BACKUP_STATIC + ".tmp"
+            shutil.copyfile(BOOK_BACKUP_FILE, temp_path)
+            os.replace(temp_path, BOOK_BACKUP_STATIC)
+            return True
     except Exception:
         return False
 
@@ -1132,6 +1143,10 @@ def bootstrap_book_library():
                 backup_book_library()
         elif not main_count and backup_count:
             restore_book_library_from_backup()
+        elif main_count and backup_count:
+            if not st.session_state.get("_book_static_synced"):
+                st.session_state["_book_static_synced"] = True
+                sync_book_backup_static()
     except Exception:
         pass
 
@@ -3075,69 +3090,19 @@ elif page == "⚙️ 典藏后台管理系统":
                     st.error(
                         "备份失败：主库中没有可读取的图书，或备份文件无法写入。"
                         f"请确认图书库中有图书，并查看服务器磁盘空间/权限。{detail}")
-            backup_dl_notice = st.session_state.pop("book_backup_dl_notice", None)
-            if backup_dl_notice:
-                st.success(backup_dl_notice)
-            if not is_valid_book_backup(BOOK_BACKUP_FILE):
-                st.info("请先点击上方“生成 / 更新图书库备份”，生成有效备份后再下载。")
-            else:
-                download_comp = _get_backup_download_component()
-                if download_comp is None:
-                    st.warning("备份下载组件缺失，请检查 backup_download_component 目录。")
-                else:
-                    reset_download = st.session_state.pop("book_backup_dl_reset", False)
-                    if reset_download:
-                        for key in ("book_backup_dl_active", "book_backup_dl_index",
-                                    "book_backup_dl_total", "book_backup_dl_id"):
-                            st.session_state.pop(key, None)
-                    dl_active = bool(st.session_state.get("book_backup_dl_active", False))
-                    dl_index = int(st.session_state.get("book_backup_dl_index", 0))
-                    dl_total = int(st.session_state.get("book_backup_dl_total", 0))
-                    dl_id = st.session_state.get("book_backup_dl_id", "")
-                    dl_chunk = ""
-                    if dl_active and 0 <= dl_index < dl_total:
-                        try:
-                            with open(BOOK_BACKUP_FILE, "rb") as backup_file:
-                                backup_file.seek(dl_index * BACKUP_DOWNLOAD_CHUNK)
-                                dl_chunk = base64.b64encode(
-                                    backup_file.read(BACKUP_DOWNLOAD_CHUNK)).decode("ascii")
-                        except Exception:
-                            dl_active = False
-                    dl_event = download_comp(
-                        active=dl_active,
-                        index=dl_index,
-                        total=dl_total,
-                        filename="book_library_backup.db",
-                        id=dl_id,
-                        chunk=dl_chunk,
-                        reset=reset_download,
-                        key="book_backup_downloader")
-                    if isinstance(dl_event, dict):
-                        action = dl_event.get("action")
-                        if action == "start" and not dl_active:
-                            try:
-                                size = os.path.getsize(BOOK_BACKUP_FILE)
-                                total_chunks = max(
-                                    1, (size + BACKUP_DOWNLOAD_CHUNK - 1) // BACKUP_DOWNLOAD_CHUNK)
-                                st.session_state["book_backup_dl_active"] = True
-                                st.session_state["book_backup_dl_index"] = 0
-                                st.session_state["book_backup_dl_total"] = total_chunks
-                                st.session_state["book_backup_dl_id"] = str(
-                                    dl_event.get("id", ""))
-                            except Exception as e:
-                                st.error(f"读取备份失败：{e}")
-                            st.rerun()
-                        elif (action == "ack" and dl_active
-                              and str(dl_event.get("id", "")) == dl_id
-                              and int(dl_event.get("index", -1)) == dl_index):
-                            st.session_state["book_backup_dl_index"] = dl_index + 1
-                            st.rerun()
-                        elif action == "done" and str(dl_event.get("id", "")) == dl_id:
-                            st.session_state["book_backup_dl_active"] = False
-                            st.session_state["book_backup_dl_reset"] = True
-                            st.session_state["book_backup_dl_notice"] = (
-                                "✅ 图书库备份已开始下载。")
-                            st.rerun()
+            if is_valid_book_backup(BOOK_BACKUP_STATIC):
+                static_version = os.stat(BOOK_BACKUP_STATIC).st_mtime_ns
+                st.markdown(
+                    f'<a href="app/static/book_library_backup.db?v={static_version}" '
+                    'download target="_blank" '
+                    'style="display:inline-block;padding:10px 18px;margin:6px 0;'
+                    'background:#1F7A3D;color:#FFFFFF;border-radius:8px;'
+                    'text-decoration:none;font-weight:bold;font-size:15px;">'
+                    '⬇️ 下载图书库备份（.db）</a>',
+                    unsafe_allow_html=True)
+                st.caption("直接点击链接下载；链接带版本号，避免浏览器使用旧缓存。")
+            elif is_valid_book_backup(BOOK_BACKUP_FILE):
+                st.info("请先点击上方“生成 / 更新图书库备份”，生成静态下载文件。")
 
             st.markdown("#### 📥 恢复图书库备份")
             st.caption("上传之前下载的 .db 备份，会覆盖当前图书库，请确认后再操作。")
