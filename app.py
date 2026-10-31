@@ -1199,7 +1199,6 @@ def bootstrap_book_library():
         pass
 
 
-@st.fragment
 def render_chunk_book_uploader():
     st.markdown("### 📦 超大文件 / 批量 ZIP 分片上传")
     st.caption(
@@ -1289,7 +1288,7 @@ def render_chunk_book_uploader():
                 st.session_state["book_chunk_notice"] = notice
                 st.rerun(scope="app")
             elif is_new:
-                st.rerun(scope="fragment")
+                st.rerun(scope="app")
         except Exception as e:
             st.error(f"分片上传失败：{e}")
             st.session_state["book_chunk_reset"] = True
@@ -3040,91 +3039,7 @@ elif page == "⚙️ 典藏后台管理系统":
         with tab_books:
             st.subheader("📚 图书批量导入")
             st.caption("支持 PDF、DOC、DOCX、WPS、TXT、MD、RTF；书名取文件名（不含扩展名）。")
-            book_category = st.selectbox(
-                "图书分类", BOOK_CATEGORIES, key="book_import_category")
             render_chunk_book_uploader()
-            st.markdown("### 📚 普通上传（小文件备用）")
-            st.markdown("### 📚 批量导入（ZIP 压缩包）")
-            st.caption(
-                "把多本 PDF/DOC/DOCX/WPS/TXT/MD/RTF 放进一个 ZIP，"
-                "上传后一次全部导入；分类使用上面选择的分类。")
-            batch_zip = st.file_uploader(
-                "选择包含多本图书的 ZIP 压缩包",
-                type=["zip"],
-                accept_multiple_files=False,
-                key="book_batch_zip")
-            if st.button("开始批量导入 ZIP", type="primary", key="book_batch_run"):
-                if not batch_zip:
-                    st.warning("请先选择 ZIP 压缩包。")
-                else:
-                    progress = st.progress(0.0, text="正在读取压缩包...")
-                    def _zip_progress(i, total, filename):
-                        progress.progress(
-                            i / total, text=f"已处理 {i}/{total}：{filename}")
-                    success_count, warnings = import_books_from_zip(
-                        io.BytesIO(batch_zip.getvalue()),
-                        book_category, _zip_progress)
-                    progress.progress(1.0, text="批量导入完成")
-                    clear_search_caches()
-                    st.success(f"✅ 批量导入完成，成功 {success_count} 本。")
-                    for message in warnings:
-                        st.warning(message)
-
-            st.markdown("### 📖 单本导入")
-            uploaded_book = st.file_uploader(
-                "选择图书文件（一次一个）", type=BOOK_FILE_TYPES,
-                accept_multiple_files=False,
-                key="book_import_files")
-            uploaded_books = [uploaded_book] if uploaded_book else []
-            if uploaded_books:
-                st.caption("已选择：" + "、".join(f.name for f in uploaded_books))
-            st.caption(f"单个文件上限约 {MAX_BOOK_UPLOAD_MB}MB；超过 200MB 的 PDF 会按扫描版处理。")
-
-            if st.button("开始导入图书", type="primary", key="book_import_run"):
-                if not uploaded_books:
-                    st.warning("请先选择图书文件。")
-                else:
-                    success_count = 0
-                    warnings = []
-                    try:
-                        conn = get_connection()
-                        try:
-                            total = len(uploaded_books)
-                            progress = st.progress(0.0, text="正在导入图书...")
-                            for i, uploaded in enumerate(uploaded_books, start=1):
-                                filename = os.path.basename(uploaded.name)
-                                title = os.path.splitext(filename)[0].strip() or "未命名图书"
-                                fmt = os.path.splitext(filename)[1].lower().lstrip(".")
-                                try:
-                                    if getattr(uploaded, "size", 0) > MAX_BOOK_UPLOAD_MB * 1024 * 1024:
-                                        raise ValueError(
-                                            f"文件超过 {MAX_BOOK_UPLOAD_MB}MB 上限")
-                                    data = uploaded.getvalue()
-                                    text, page_count, error = extract_book_content(data, filename)
-                                    upsert_book(
-                                        conn, book_category, title, fmt, filename,
-                                        data, text, page_count)
-                                    conn.commit()
-                                    success_count += 1
-                                    if error:
-                                        warnings.append(f"{filename}：{error}")
-                                except Exception as e:
-                                    warnings.append(f"{filename}：导入失败 {e}")
-                                progress.progress(
-                                    i / total, text=f"已处理 {i}/{total}：{filename}")
-                            progress.progress(1.0, text="图书导入完成")
-                        finally:
-                            conn.close()
-                        try:
-                            clear_search_caches()
-                        except Exception:
-                            pass
-                        clear_search_caches()
-                        st.success(f"✅ 图书导入完成，共处理 {success_count} 个文件。")
-                        for message in warnings:
-                            st.warning(message)
-                    except Exception as e:
-                        st.error(f"图书导入失败：{e}")
 
             st.markdown("### 现有图书")
             conn = get_connection()
