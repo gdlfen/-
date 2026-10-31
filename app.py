@@ -1428,6 +1428,13 @@ READER_GESTURE_JS_V2 = r"""
       if (!active || !e.touches || !e.touches.length) return;
       var mx = e.touches[0].clientX - sx;
       var my = e.touches[0].clientY - sy;
+      var landscapeMode = active.getAttribute("data-tcm-landscape") === "1";
+      if (landscapeMode) {
+        if (Math.abs(my) > Math.abs(mx) && Math.abs(my) > 20) {
+          e.preventDefault();
+        }
+        return;
+      }
       if (Math.abs(mx) > Math.abs(my) && Math.abs(mx) > 20 &&
           ((mx < 0 && startAtRight) || (mx > 0 && startAtLeft))) {
         e.preventDefault();
@@ -1447,9 +1454,16 @@ READER_GESTURE_JS_V2 = r"""
       }
       var dx = e.changedTouches[0].clientX - sx;
       var dy = e.changedTouches[0].clientY - sy;
-      var horizontal = Math.abs(dx) > 140 && Math.abs(dx) > Math.abs(dy) * 1.5;
-      if (horizontal && ((dx < 0 && startAtRight) || (dx > 0 && startAtLeft))) {
-        turn(dx < 0 ? "next" : "prev");
+      var landscapeMode = active.getAttribute("data-tcm-landscape") === "1";
+      if (landscapeMode) {
+        if (Math.abs(dy) > 140 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+          turn(dy < 0 ? "next" : "prev");
+        }
+      } else {
+        var horizontal = Math.abs(dx) > 140 && Math.abs(dx) > Math.abs(dy) * 1.5;
+        if (horizontal && ((dx < 0 && startAtRight) || (dx > 0 && startAtLeft))) {
+          turn(dx < 0 ? "next" : "prev");
+        }
       }
       active = null;
       startAtTop = startAtBottom = startAtLeft = startAtRight = false;
