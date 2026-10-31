@@ -58,7 +58,7 @@ VERIF_PAGE_SIZE = 20  # 各种验方检索每页条数
 FORMULA_PAGE_SIZE = 20  # 传世名方基础检索每页条数
 BOOK_PAGE_CHARS = 1200  # 图书文本阅读每页字符数
 MAX_BOOK_UPLOAD_MB = 900  # 单个图书文件上限（.streamlit/config.toml 设置为 1024MB）
-BACKUP_DOWNLOAD_CHUNK = 512 * 1024
+BACKUP_PART_SIZE = 8 * 1024 * 1024
 BOOK_BACKUP_FILE = os.environ.get(
     "TCM_BOOK_BACKUP_FILE",
     os.path.join(os.path.dirname(os.path.abspath(DB_FILE)), "book_library_backup.db"))
@@ -1154,65 +1154,6 @@ def bootstrap_book_library():
             restore_book_library_from_backup()
     except Exception:
         pass
-
-
-@st.fragment
-def render_backup_download_fragment():
-    """备份分片下载放在 fragment 中，避免每片都重跑整页导致会话重置。"""
-    if not is_valid_book_backup(DB_FILE):
-        st.info("主数据库中没有可下载的图书。")
-        return
-    download_comp = _get_backup_download_component()
-    if download_comp is None:
-        st.warning("备份下载组件缺失，请重新部署完整程序包。")
-        return
-    reset_download = st.session_state.pop("book_backup_dl_reset", False)
-    if reset_download:
-        for key in ("book_backup_dl_active", "book_backup_dl_index",
-                    "book_backup_dl_total", "book_backup_dl_id"):
-            st.session_state.pop(key, None)
-    dl_active = bool(st.session_state.get("book_backup_dl_active", False))
-    dl_index = int(st.session_state.get("book_backup_dl_index", 0))
-    dl_total = int(st.session_state.get("book_backup_dl_total", 0))
-    dl_id = st.session_state.get("book_backup_dl_id", "")
-    dl_chunk = ""
-    if dl_active and 0 <= dl_index < dl_total:
-        try:
-            with open(DB_FILE, "rb") as backup_file:
-                backup_file.seek(dl_index * BACKUP_DOWNLOAD_CHUNK)
-                dl_chunk = base64.b64encode(
-                    backup_file.read(BACKUP_DOWNLOAD_CHUNK)).decode("ascii")
-        except Exception:
-            dl_active = False
-    dl_event = download_comp(
-        active=dl_active,
-        index=dl_index,
-        total=dl_total,
-        filename="book_library_backup.db",
-        id=dl_id,
-        chunk=dl_chunk,
-        reset=reset_download,
-        key="book_backup_downloader")
-    if isinstance(dl_event, dict):
-        action = dl_event.get("action")
-        if action == "start" and not dl_active:
-            size = os.path.getsize(DB_FILE)
-            total_chunks = max(
-                1, (size + BACKUP_DOWNLOAD_CHUNK - 1) // BACKUP_DOWNLOAD_CHUNK)
-            st.session_state["book_backup_dl_active"] = True
-            st.session_state["book_backup_dl_index"] = 0
-            st.session_state["book_backup_dl_total"] = total_chunks
-            st.session_state["book_backup_dl_id"] = str(dl_event.get("id", ""))
-            st.rerun(scope="fragment")
-        elif (action == "ack" and dl_active
-              and str(dl_event.get("id", "")) == dl_id
-              and int(dl_event.get("index", -1)) == dl_index):
-            st.session_state["book_backup_dl_index"] = dl_index + 1
-            st.rerun(scope="fragment")
-        elif action == "done" and str(dl_event.get("id", "")) == dl_id:
-            st.session_state["book_backup_dl_active"] = False
-            st.session_state["book_backup_dl_reset"] = True
-            st.rerun(scope="fragment")
 
 
 def build_book_pages(text):
@@ -3149,9 +3090,36 @@ elif page == "⚙️ 典藏后台管理系统":
             st.caption("旧版 DOC/WPS 二进制文件若无法提取文字，暂不支持在线阅读。")
             st.markdown("### 📦 图书库备份与恢复")
             st.caption(
-                "点击下载后，系统会读取当前完整数据库并生成可保存的 .db 文件；"
-                "该备份包含图书库和现有业务数据。")
-            render_backup_download_fragment()
+                "当前完整数据库按 8MB 分片下载。逐个选择分片并保存，"
+                "恢复时把全部分片一起上传合并。")
+            try:
+                db_size = os.path.getsize(DB_FILE)
+            except Exception:
+                db_size = 0
+            total_parts = max(1, (db_size + BACKUP_PART_SIZE - 1) // BACKUP_PART_SIZE)
+            st.caption(f"数据库大小：{db_size / (1024 * 1024):.1f} MB，共 {total_parts} 片。")
+            part_no = st.selectbox(
+                "选择要下载的分片",
+                options=list(range(1, total_parts + 1)),
+                format_func=lambda n: f"第 {n} / {total_parts} 片",
+                key="book_backup_part_no")
+            try:
+                with open(DB_FILE, "rb") as backup_src:
+                    backup_src.seek((part_no - 1) * BACKUP_PART_SIZE)
+                    part_bytes = backup_src.read(BACKUP_PART_SIZE)
+                part_b64 = base64.b64encode(part_bytes).decode("ascii")
+                part_name = f"book_library_backup.db.part{part_no:02d}"
+                st.markdown(
+                    f'<a href="data:application/octet-stream;base64,{part_b64}" '
+                    f'download="{part_name}" '
+                    'style="display:inline-block;padding:10px 18px;margin:6px 0;'
+                    'background:#1F7A3D;color:#FFFFFF;border-radius:8px;'
+                    'text-decoration:none;font-weight:bold;font-size:15px;">'
+                    f'⬇️ 下载第 {part_no} / {total_parts} 片（{part_name}）</a>',
+                    unsafe_allow_html=True)
+                st.caption("点击链接后浏览器会直接保存这一片；下载完再选择下一片。")
+            except Exception as e:
+                st.error(f"读取备份分片失败：{e}")
 
             st.markdown("#### 📥 恢复图书库备份")
             st.caption("上传之前下载的 .db 备份，会覆盖当前图书库，请确认后再操作。")
@@ -3195,6 +3163,51 @@ elif page == "⚙️ 典藏后台管理系统":
                                     st.rerun()
                                 else:
                                     st.error("恢复失败，请检查备份文件。")
+
+            st.markdown("##### 分片合并恢复")
+            st.caption("把下载的全部分片一起选中，按文件名顺序合并后恢复。")
+            uploaded_parts = st.file_uploader(
+                "选择备份分片（可多选）",
+                accept_multiple_files=True,
+                key="book_backup_parts")
+            if st.button("合并分片并恢复", key="book_backup_parts_restore"):
+                if not uploaded_parts:
+                    st.warning("请先选择分片文件。")
+                else:
+                    ordered_parts = sorted(uploaded_parts, key=lambda f: f.name)
+                    raw = b"".join(part.getvalue() for part in ordered_parts)
+                    if not raw.startswith(b"SQLite format 3\x00"):
+                        st.error("合并后的文件不是有效的 SQLite 数据库。")
+                    else:
+                        temp_path = BOOK_BACKUP_FILE + ".merged"
+                        with open(temp_path, "wb") as f:
+                            f.write(raw)
+                        try:
+                            test_conn = sqlite3.connect(temp_path)
+                            try:
+                                count = test_conn.execute(
+                                    "SELECT COUNT(*) FROM books").fetchone()[0]
+                            finally:
+                                test_conn.close()
+                        except Exception:
+                            count = 0
+                        if not count:
+                            st.error("合并后的备份没有图书数据。")
+                            try:
+                                os.remove(temp_path)
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                os.replace(temp_path, BOOK_BACKUP_FILE)
+                                if restore_book_library_from_backup(force=True):
+                                    clear_search_caches()
+                                    st.success("✅ 分片备份已合并并恢复。")
+                                    st.rerun()
+                                else:
+                                    st.error("恢复失败，请检查分片是否完整。")
+                            except Exception as e:
+                                st.error(f"合并恢复失败：{e}")
 
         with tab_password:
             st.subheader("🔐 后台登录密码")
