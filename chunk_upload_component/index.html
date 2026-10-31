@@ -93,7 +93,7 @@
     nextIndex = 0;
     ackIndex = -1;
     barEl.style.width = "0";
-    statusEl.textContent = "准备上传 " + (currentFile.size / 1024 / 1024).toFixed(1) + "MB…";
+    statusEl.textContent = "已选择：" + currentFile.name + "（" + (currentFile.size / 1024 / 1024).toFixed(1) + "MB），正在分片上传…";
     sendChunk(0);
   });
   window.addEventListener("message", function (event) {
